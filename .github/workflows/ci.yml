@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  typecheck:
+    name: TypeScript typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: tsc --noEmit
+        run: npx tsc --noEmit
+
+  sql-syntax:
+    name: SQL syntax check
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rumen_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Parse 001_rumen_tables.sql (no execute)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          # Use psql in --set ON_ERROR_STOP but wrap in a transaction rollback
+          # so we only check syntax + DDL validity without persisting changes.
+          psql -h localhost -U postgres -d rumen_ci -v ON_ERROR_STOP=1 <<'SQL'
+          BEGIN;
+          \i migrations/001_rumen_tables.sql
+          ROLLBACK;
+          SQL
+      - name: Lint 002_pg_cron_schedule.sql (static parse only)
+        run: |
+          # pg_cron + net extensions are not present in vanilla postgres:16,
+          # so we only do a light grep-based sanity check rather than execute.
+          grep -q "cron.schedule" migrations/002_pg_cron_schedule.sql
+          grep -q "rumen-tick" migrations/002_pg_cron_schedule.sql
+          grep -q "net.http_post" migrations/002_pg_cron_schedule.sql
