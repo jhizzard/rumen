@@ -1,0 +1,12 @@
+{
+  "name": "Rumen",
+  "image": "mcr.microsoft.com/devcontainers/typescript-node:20",
+  "postCreateCommand": "npm install && npm run typecheck",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "typescript.tsdk": "node_modules/typescript/lib"
+      }
+    }
+  }
+}
