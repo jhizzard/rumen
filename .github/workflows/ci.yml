@@ -59,3 +59,63 @@ jobs:
           grep -q "cron.schedule" migrations/002_pg_cron_schedule.sql
           grep -q "rumen-tick" migrations/002_pg_cron_schedule.sql
           grep -q "net.http_post" migrations/002_pg_cron_schedule.sql
+
+  integration-test:
+    name: End-to-end rumen job against ephemeral Postgres
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: rumen_it
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # Rumen connects via this. No ANTHROPIC_API_KEY in CI — the synthesize
+      # phase logs "no API key, falling back to placeholder" and the job
+      # still produces rumen_insights rows. That is exactly the T4.2
+      # acceptance criterion: ensure the loop runs end-to-end on a real DB.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/rumen_it
+      PGPASSWORD: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm install
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Apply Engram fixture schema + seed data
+        run: |
+          psql -h localhost -U postgres -d rumen_it -v ON_ERROR_STOP=1 \
+            -f tests/fixtures/engram-minimal.sql
+      - name: Apply Rumen tables
+        run: |
+          psql -h localhost -U postgres -d rumen_it -v ON_ERROR_STOP=1 \
+            -f migrations/001_rumen_tables.sql
+      - name: Run end-to-end rumen job
+        run: npx tsx scripts/test-locally.ts
+      - name: Assert at least one rumen_insights row exists
+        run: |
+          ROWS=$(psql -h localhost -U postgres -d rumen_it -At -c \
+            "SELECT COUNT(*) FROM rumen_insights;")
+          echo "rumen_insights rows: $ROWS"
+          if [ "$ROWS" -lt 1 ]; then
+            echo "::error::expected at least one rumen_insights row, got $ROWS"
+            exit 1
+          fi
+      - name: Dump rumen_jobs + rumen_insights for the run log
+        if: always()
+        run: |
+          psql -h localhost -U postgres -d rumen_it -c \
+            "SELECT id, status, sessions_processed, insights_generated, error_message FROM rumen_jobs ORDER BY started_at DESC LIMIT 5;"
+          psql -h localhost -U postgres -d rumen_it -c \
+            "SELECT id, confidence, projects, LEFT(insight_text, 120) AS insight FROM rumen_insights ORDER BY created_at DESC LIMIT 5;"

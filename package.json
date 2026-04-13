@@ -20,12 +20,14 @@
     "test:local": "tsx scripts/test-locally.ts"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.1",
+    "dotenv": "^17.4.2",
     "pg": "^8.11.3"
   },
   "devDependencies": {
     "@types/pg": "^8.11.0",
-    "typescript": "^5.4.0",
-    "tsx": "^4.7.0"
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
   },
   "engines": {
     "node": ">=18"

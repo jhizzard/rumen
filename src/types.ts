@@ -97,6 +97,46 @@ export interface RelatedSignal {
   related: RelatedMemory[];
 }
 
+/**
+ * A synthesized insight produced by the Synthesize phase (v0.2+).
+ * This is the transport shape between Synthesize and Surface — it is not
+ * itself a rumen_insights row (Surface writes that), but its fields map 1:1
+ * onto the row columns.
+ */
+export interface Insight {
+  /** The RelatedSignal this insight was synthesized from. */
+  source: RelatedSignal;
+  /** 1–3 sentence human-readable insight text. */
+  insight_text: string;
+  /** 0..1 confidence score. */
+  confidence: number;
+  /** Memory UUIDs cited in insight_text (always a subset of source.related IDs). */
+  source_memory_ids: string[];
+  /** Whether this insight came from Haiku (true) or the v0.1 placeholder fallback (false). */
+  synthesized: boolean;
+}
+
+/**
+ * Runtime context passed through the Synthesize phase to track LLM budget,
+ * total tokens, and fallback status across a single Rumen job.
+ */
+export interface SynthesizeContext {
+  /** Soft cap — on cross, log a warning and fall back to the placeholder template. */
+  maxLlmCallsSoft: number;
+  /** Hard cap — on cross, abort the job. */
+  maxLlmCallsHard: number;
+  /** LLM calls made so far in this job. */
+  llmCallsMade: number;
+  /** Total input tokens across all LLM calls. */
+  inputTokens: number;
+  /** Total output tokens across all LLM calls. */
+  outputTokens: number;
+  /** True once the soft cap has been crossed; further calls fall back silently. */
+  softCapTripped: boolean;
+  /** True if no ANTHROPIC_API_KEY is set — synthesize is effectively a no-op. */
+  apiKeyMissing: boolean;
+}
+
 /** Options passed into runRumenJob. All fields are optional. */
 export interface RunRumenJobOptions {
   /** 'schedule' for pg_cron, 'manual' for CLI, 'session_end' for client-triggered runs. */

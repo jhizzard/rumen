@@ -17,6 +17,7 @@
  * run it with `tsx` (which handles TS natively) rather than `tsc`.
  */
 
+import 'dotenv/config';
 import { runRumenJob, getPool } from '../src/index.js';
 
 async function main(): Promise<void> {

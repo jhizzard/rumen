@@ -17,13 +17,23 @@
 
 import { extractSignals } from './extract.js';
 import { relateSignals } from './relate.js';
+import {
+  createSynthesizeContext,
+  synthesizeInsights,
+  makePlaceholderInsight,
+} from './synthesize.js';
 import { surfaceInsights } from './surface.js';
 import type { PgPool } from './db.js';
-import type { RumenJobSummary, RunRumenJobOptions } from './types.js';
+import type { Insight, RumenJobSummary, RunRumenJobOptions } from './types.js';
 
 export { getPool, createPoolFromUrl, withClient } from './db.js';
 export { extractSignals } from './extract.js';
 export { relateSignals } from './relate.js';
+export {
+  createSynthesizeContext,
+  synthesizeInsights,
+  makePlaceholderInsight,
+} from './synthesize.js';
 export { surfaceInsights } from './surface.js';
 export type {
   RumenJob,
@@ -35,6 +45,8 @@ export type {
   RunRumenJobOptions,
   MemoryItem,
   MemorySession,
+  Insight,
+  SynthesizeContext,
 } from './types.js';
 
 const DEFAULT_MAX_SESSIONS = 10;
@@ -82,10 +94,30 @@ export async function runRumenJob(
       minSimilarity,
     });
 
-    // 4. Surface.
-    const surfaceResult = await surfaceInsights(pool, related, { jobId });
+    // 4. Synthesize. Hard-cap errors bubble up; on any other error we fall
+    //    back to v0.1-style placeholder insights so the job still surfaces
+    //    something.
+    const synthCtx = createSynthesizeContext();
+    let insights: Insight[];
+    try {
+      insights = await synthesizeInsights(related, synthCtx);
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('hard cap')) {
+        throw err;
+      }
+      console.error(
+        '[rumen] synthesize failed, falling back to placeholder insights:',
+        err,
+      );
+      insights = related
+        .filter((rs) => rs.related.length > 0)
+        .map((rs) => makePlaceholderInsight(rs));
+    }
 
-    // 5. Mark the job done.
+    // 5. Surface.
+    const surfaceResult = await surfaceInsights(pool, insights, { jobId });
+
+    // 6. Mark the job done.
     const done = await completeJob(pool, {
       jobId,
       status: 'done',

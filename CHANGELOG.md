@@ -5,6 +5,46 @@ All notable changes to Rumen will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Synthesize phase (`src/synthesize.ts`)** — replaces v0.1's placeholder
+  insight text with real Claude Haiku generation. Wired into `runRumenJob`
+  between Relate and Surface.
+  - Batching: up to 3 signals per model call, returned as a single JSON
+    object for token efficiency.
+  - Confidence scoring combines max similarity, cross-project bonus, and
+    age spread of related memories.
+  - Citations: the Haiku prompt asks for `[#xxxxxxxx]` short-ID citations
+    inside the insight text and returns the matching full UUIDs in
+    `cited_ids[]`. Only IDs that appear in the related-memory set survive
+    into `rumen_insights.source_memory_ids`.
+- **LLM budget guardrails.** `RUMEN_MAX_LLM_CALLS_SOFT` (default 100) logs a
+  warning and falls back to the v0.1 placeholder template for the remaining
+  signals; `RUMEN_MAX_LLM_CALLS_HARD` (default 500) aborts the job cleanly
+  (rows already written stay, no corruption). Token counts are logged per
+  call as `[rumen-synthesize] tokens=<n>`.
+- **Graceful degradation when `ANTHROPIC_API_KEY` is missing.** Rumen logs
+  `[rumen-synthesize] no API key, falling back to placeholder` and produces
+  the same insight rows as v0.1 — so the loop remains testable without a
+  Anthropic account.
+- **CI integration test.** New `integration-test` job in `.github/workflows/ci.yml`
+  spins up an ephemeral Postgres 16, applies `tests/fixtures/engram-minimal.sql`
+  + `migrations/001_rumen_tables.sql`, and runs `scripts/test-locally.ts`
+  end-to-end. Asserts at least one `rumen_insights` row is produced.
+- `Insight` and `SynthesizeContext` types exported from `src/types.ts` for
+  consumers that want to drive Synthesize independently of the full loop.
+
+### Changed
+- `surfaceInsights` now accepts `Insight[]` rather than `RelatedSignal[]`,
+  so the placeholder and real-Haiku paths share a single write layer.
+  External callers that were passing `RelatedSignal[]` directly must either
+  move to `runRumenJob` (which still takes care of Relate → Synthesize →
+  Surface) or wrap their signals with `makePlaceholderInsight` first.
+
+### Dependencies
+- Added `@anthropic-ai/sdk@^0.30.1`.
+
 ## [0.1.0] - 2026-04-11
 
 Initial release. Extract + Relate + Surface only — no LLM synthesis, no question generation.
