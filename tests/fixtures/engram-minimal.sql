@@ -76,7 +76,11 @@ RETURNS TABLE (
   source_type TEXT,
   project     TEXT,
   created_at  TIMESTAMPTZ,
-  similarity  NUMERIC
+  -- DOUBLE PRECISION, not NUMERIC: node-postgres returns NUMERIC as JS
+  -- strings, and relate.ts filters out rows where `typeof similarity !==
+  -- 'number'`, so a NUMERIC column silently drops every related memory
+  -- and zero rumen_insights rows get written.
+  similarity  DOUBLE PRECISION
 )
 LANGUAGE plpgsql
 AS $$
@@ -98,7 +102,7 @@ BEGIN
           WHEN POSITION(needle IN LOWER(m.content)) > 0 THEN 0.85
           ELSE 0.75
         END
-      )::NUMERIC AS similarity
+      )::DOUBLE PRECISION AS similarity
     FROM memory_items m
     WHERE (project_filter IS NULL OR m.project = project_filter)
     ORDER BY similarity DESC, m.created_at DESC

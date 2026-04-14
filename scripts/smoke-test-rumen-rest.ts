@@ -1,8 +1,20 @@
 /**
- * Test Rumen pipeline using Supabase REST API (no direct pg needed).
- * Uses the same service role key that TermDeck's AI query uses.
+ * Smoke test for the Rumen pipeline against a hosted Supabase project,
+ * hitting only the REST API (no direct Postgres connection required).
  *
- * Usage: npx tsx scripts/test-rest.ts
+ * Complements `scripts/test-locally.ts`, which drives the full Rumen job
+ * against a local/dockerized Postgres using `pg`. Use this script when
+ * you only have a SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (for example
+ * against production) and want a quick end-to-end sanity check that
+ * Extract → Relate → Surface writes rows to `rumen_jobs`/`rumen_insights`.
+ *
+ * Uses a simple cross-project heuristic instead of the real synthesize
+ * phase, so it is not a substitute for the full pipeline. Writes a real
+ * `rumen_jobs` row tagged `triggered_by=test-rest` — do not run it
+ * against production unless you're okay with that side effect.
+ *
+ * Usage: npx tsx scripts/smoke-test-rumen-rest.ts
+ * Env:   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY (via .env or shell)
  */
 
 import 'dotenv/config';
