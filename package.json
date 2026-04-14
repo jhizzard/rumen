@@ -1,6 +1,6 @@
 {
   "name": "@jhizzard/rumen",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Async learning layer that runs on top of any pgvector memory store. The LLM is stateless. Rumen isn't.",
   "license": "MIT",
   "author": "Joshua Izzard",
