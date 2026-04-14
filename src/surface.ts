@@ -7,7 +7,7 @@
  * fallback, both represented uniformly) and just persists them.
  *
  * Surface is NON-DESTRUCTIVE. It only INSERTs into rumen_insights. It never
- * touches memory_items, memory_sessions, or any other Engram table.
+ * touches memory_items, memory_sessions, or any other Mnemos table.
  */
 
 import type { PgPool } from './db.js';

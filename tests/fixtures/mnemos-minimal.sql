@@ -1,6 +1,6 @@
--- Minimal Engram-compatible fixture for Rumen CI integration tests.
+-- Minimal Mnemos-compatible fixture for Rumen CI integration tests.
 --
--- Creates the subset of the Engram schema Rumen v0.1 reads — memory_sessions,
+-- Creates the subset of the Mnemos schema Rumen v0.1 reads — memory_sessions,
 -- memory_items, and the memory_hybrid_search() SQL function — and seeds two
 -- sessions across two projects so extract → relate → synthesize → surface
 -- produces at least one insight. Does not install pgvector: the vector column
@@ -12,7 +12,7 @@ BEGIN;
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- Rumen casts its (NULL) embedding argument to `::vector` in relate.ts. The
--- real Engram deployment has pgvector installed; for CI we don't, so we
+-- real Mnemos deployment has pgvector installed; for CI we don't, so we
 -- alias `vector` to NUMERIC[] as a DOMAIN so the cast parses. Rumen never
 -- reads embedding values through this path, it only passes NULL.
 DO $$

@@ -93,10 +93,10 @@ jobs:
         run: npm install
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
-      - name: Apply Engram fixture schema + seed data
+      - name: Apply Mnemos fixture schema + seed data
         run: |
           psql -h localhost -U postgres -d rumen_it -v ON_ERROR_STOP=1 \
-            -f tests/fixtures/engram-minimal.sql
+            -f tests/fixtures/mnemos-minimal.sql
       - name: Apply Rumen tables
         run: |
           psql -h localhost -U postgres -d rumen_it -v ON_ERROR_STOP=1 \

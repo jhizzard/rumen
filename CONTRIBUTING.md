@@ -6,7 +6,7 @@ Thanks for taking an interest. Rumen is small on purpose — please keep contrib
 
 1. **Rumen is non-destructive.** Any PR that adds code that modifies or deletes rows in tables other than `rumen_*` will be rejected. Rumen only writes new rows into its own tables.
 2. **No LLM calls in v0.1.** Synthesis, question generation, and any calls to Anthropic/OpenAI/etc. are reserved for v0.2+. A v0.1 PR that adds a model call will be rejected.
-3. **Raw `pg` only, no ORMs.** See `docs/ENGRAM-COMPATIBILITY.md` for the reasoning.
+3. **Raw `pg` only, no ORMs.** See `docs/MNEMOS-COMPATIBILITY.md` for the reasoning.
 4. **Deno-compatible Edge Function.** Anything in `supabase/functions/` must run under Deno without a bundler. Keep imports standard-library or `npm:` specifiers.
 
 ## Style
@@ -37,7 +37,7 @@ npm run typecheck
 npm run test:local     # runs scripts/test-locally.ts against a local Postgres
 ```
 
-You will need a Postgres database with Engram's schema applied. See `docs/ENGRAM-COMPATIBILITY.md`.
+You will need a Postgres database with Mnemos's schema applied. See `docs/MNEMOS-COMPATIBILITY.md`.
 
 ## Pull requests
 

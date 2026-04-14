@@ -5,8 +5,8 @@
  *   DATABASE_URL=postgresql://localhost:5432/rumen_test npx tsx scripts/test-locally.ts
  *
  * Prerequisites:
- *   1. A Postgres database with Engram's schema applied (memory_items,
- *      memory_sessions, memory_hybrid_search). See docs/ENGRAM-COMPATIBILITY.md.
+ *   1. A Postgres database with Mnemos's schema applied (memory_items,
+ *      memory_sessions, memory_hybrid_search). See docs/MNEMOS-COMPATIBILITY.md.
  *   2. Rumen's own migrations applied:
  *        psql "$DATABASE_URL" -f migrations/001_rumen_tables.sql
  *

@@ -37,7 +37,7 @@
     "memory",
     "pgvector",
     "supabase",
-    "engram",
+    "mnemos",
     "llm",
     "async-learning"
   ]

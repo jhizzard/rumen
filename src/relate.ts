@@ -1,12 +1,12 @@
 /**
  * Rumen v0.1 — Relate phase.
  *
- * For each signal from the Extract phase, run Engram's memory_hybrid_search
+ * For each signal from the Extract phase, run Mnemos's memory_hybrid_search
  * SQL function to find prior art across ALL historical memories. Keep the
  * top-5 candidates with similarity above the configured minimum.
  *
  * v0.1 note: we call memory_hybrid_search with query_embedding = NULL. The
- * Engram implementation falls back to keyword-only matching in that case,
+ * Mnemos implementation falls back to keyword-only matching in that case,
  * which is enough to validate the Rumen loop end-to-end without requiring
  * Rumen to own an embeddings provider. v0.2 will add real embeddings.
  */

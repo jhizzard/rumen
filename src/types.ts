@@ -1,8 +1,8 @@
 /**
  * Shared types for Rumen v0.1.
  *
- * The MemoryItem / MemorySession types describe the subset of Engram's schema
- * that Rumen reads. See docs/ENGRAM-COMPATIBILITY.md for the full contract.
+ * The MemoryItem / MemorySession types describe the subset of Mnemos's schema
+ * that Rumen reads. See docs/MNEMOS-COMPATIBILITY.md for the full contract.
  */
 
 export type RumenTriggeredBy = 'schedule' | 'session_end' | 'manual';
@@ -35,7 +35,7 @@ export interface RumenInsight {
 }
 
 /**
- * A MemoryItem as read from Engram's `memory_items` table.
+ * A MemoryItem as read from Mnemos's `memory_items` table.
  * v0.1 only consumes fields; it never writes to memory_items.
  */
 export interface MemoryItem {
@@ -50,7 +50,7 @@ export interface MemoryItem {
    */
 }
 
-/** A session from Engram's `memory_sessions` table. */
+/** A session from Mnemos's `memory_sessions` table. */
 export interface MemorySession {
   id: string;
   project: string | null;
@@ -71,7 +71,7 @@ export interface RumenSignal {
   key: string;
   /** The session this signal came from. */
   session_id: string;
-  /** Project name (nullable if Engram row has no project). */
+  /** Project name (nullable if Mnemos row has no project). */
   project: string | null;
   /** A short human-readable description of what happened. v0.1 uses the session summary. */
   description: string;

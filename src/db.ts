@@ -2,7 +2,7 @@
  * Postgres Pool factory for Rumen v0.1.
  *
  * Rumen uses raw `pg` (node-postgres), NOT Prisma. See
- * docs/ENGRAM-COMPATIBILITY.md for the reasoning.
+ * docs/MNEMOS-COMPATIBILITY.md for the reasoning.
  *
  * Connection URL MUST be a Supabase Shared Pooler IPv4 URL. Never use the
  * Dedicated Pooler URL — it is IPv6-only and will silently fail from
