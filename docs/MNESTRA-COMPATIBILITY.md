@@ -1,12 +1,12 @@
-# Mnemos compatibility contract (Rumen v0.1)
+# Mnestra compatibility contract (Rumen v0.1)
 
-Rumen v0.1 is **tightly coupled** to the schema exposed by [Mnemos](https://github.com/jhizzard/mnemos). Future Rumen versions may abstract this behind an adapter layer, but v0.1 reads Mnemos's tables and calls Mnemos's SQL functions directly. If your memory store does not follow the Mnemos schema, Rumen v0.1 will not work.
+Rumen v0.1 is **tightly coupled** to the schema exposed by [Mnestra](https://github.com/jhizzard/mnestra). Future Rumen versions may abstract this behind an adapter layer, but v0.1 reads Mnestra's tables and calls Mnestra's SQL functions directly. If your memory store does not follow the Mnestra schema, Rumen v0.1 will not work.
 
 This document is the frozen contract for v0.1. Any change here is a breaking change and requires a minor version bump.
 
 ## Why coupled?
 
-See the Podium lessons referenced in the RUMEN pre-deployment checklist: Rumen is intentionally small (~200 LOC in v0.1) and uses raw `pg` rather than Prisma. Introducing an adapter layer would roughly double the surface area for no v0.1 benefit. Mnemos is the first and currently only consumer, so we couple now and abstract later if a second memory store needs to plug in.
+See the Podium lessons referenced in the RUMEN pre-deployment checklist: Rumen is intentionally small (~200 LOC in v0.1) and uses raw `pg` rather than Prisma. Introducing an adapter layer would roughly double the surface area for no v0.1 benefit. Mnestra is the first and currently only consumer, so we couple now and abstract later if a second memory store needs to plug in.
 
 ## Required tables
 
@@ -22,7 +22,7 @@ See the Podium lessons referenced in the RUMEN pre-deployment checklist: Rumen i
 | `session_id`  | `uuid` (nullable) | yes      | Join key from `memory_items` back to `memory_sessions`. |
 | `embedding`   | `vector(1536)`    | yes (for v0.2) | v0.1 does NOT read embeddings directly; it calls `memory_hybrid_search` which does. |
 
-v0.1 never writes to `memory_items`. Rumen is strictly a reader of Mnemos's memory tables.
+v0.1 never writes to `memory_items`. Rumen is strictly a reader of Mnestra's memory tables.
 
 ### `memory_sessions`
 
@@ -57,11 +57,11 @@ memory_hybrid_search(
 )
 ```
 
-- Rumen calls this with `query_embedding := NULL` in v0.1. Mnemos's implementation must fall back to keyword-only (tsvector) matching when the embedding argument is NULL. v0.2 will start passing a real embedding.
+- Rumen calls this with `query_embedding := NULL` in v0.1. Mnestra's implementation must fall back to keyword-only (tsvector) matching when the embedding argument is NULL. v0.2 will start passing a real embedding.
 - Rumen passes `project_filter := NULL` to search across all projects. Cross-project prior art is the core value Rumen delivers.
 - `similarity` is expected in the range `[0, 1]`. Rumen thresholds at `0.7` by default.
 
-If your Mnemos fork returns additional columns, Rumen will ignore them — the column list above is the minimum.
+If your Mnestra fork returns additional columns, Rumen will ignore them — the column list above is the minimum.
 
 ## What Rumen writes
 
@@ -71,7 +71,7 @@ This is the core safety rule and every PR to Rumen must preserve it. See `CONTRI
 
 ## Breaking the contract
 
-If Mnemos renames a column or changes a signature:
+If Mnestra renames a column or changes a signature:
 
 - **Rename a column in `memory_items` or `memory_sessions`** → Rumen v0.1 `extract.ts` must be updated; bump Rumen minor.
 - **Change `memory_hybrid_search` signature** → Rumen v0.1 `relate.ts` must be updated; bump Rumen minor.
@@ -79,4 +79,4 @@ If Mnemos renames a column or changes a signature:
 
 ## Forward path
 
-v0.5+ is the likely home for an adapter abstraction: `RumenMemoryStore` interface with `fetchRecentSessions`, `searchRelated`, etc. Until then, if you need to run Rumen on top of a non-Mnemos store, fork `extract.ts` and `relate.ts` rather than trying to configure around them.
+v0.5+ is the likely home for an adapter abstraction: `RumenMemoryStore` interface with `fetchRecentSessions`, `searchRelated`, etc. Until then, if you need to run Rumen on top of a non-Mnestra store, fork `extract.ts` and `relate.ts` rather than trying to configure around them.

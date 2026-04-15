@@ -2,7 +2,7 @@
 
 **The LLM is stateless. Rumen isn't.**
 
-Rumen is an async learning layer that runs on top of any pgvector memory store (such as [Mnemos](https://github.com/jhizzard/mnemos)). It wakes up on a schedule, looks at what you did recently, cross-references it with everything you've ever done, and writes the connections back into your memory store as insights.
+Rumen is an async learning layer that runs on top of any pgvector memory store (such as [Mnestra](https://github.com/jhizzard/mnestra)). It wakes up on a schedule, looks at what you did recently, cross-references it with everything you've ever done, and writes the connections back into your memory store as insights.
 
 A rumen is the first chamber of a ruminant's stomach where food is continuously broken down and re-processed long after the animal stops eating. The word _ruminate_ literally comes from it. The metaphor IS the product: your thoughts keep getting processed after you stop working.
 
@@ -22,25 +22,25 @@ v0.1 = **Extract + Relate + Surface only**. No LLM synthesis, no question genera
 
 The loop:
 
-1. **Extract** — pull recent session memories (last 24–72 hours) from Mnemos. Filter out trivial sessions (<3 events).
-2. **Relate** — for each signal, run a hybrid search across all historical memories via the `memory_hybrid_search` SQL function Mnemos already exposes. Keep top-5 candidates with similarity > 0.7.
+1. **Extract** — pull recent session memories (last 24–72 hours) from Mnestra. Filter out trivial sessions (<3 events).
+2. **Relate** — for each signal, run a hybrid search across all historical memories via the `memory_hybrid_search` SQL function Mnestra already exposes. Keep top-5 candidates with similarity > 0.7.
 3. **Surface** — write a new row into `rumen_insights` for each signal, with `source_memory_ids[]` populated so the connection is traceable. For v0.1 the `insight_text` is a concatenation like `"Found 5 related memories from project X about Y"`. v0.2 replaces this with real LLM synthesis.
 
 No Anthropic/OpenAI calls are present in the v0.1 codebase. This is intentional.
 
 ---
 
-## Pairs with Mnemos
+## Pairs with Mnestra
 
-Rumen is a **reasoning layer**, not a memory store. It assumes the schema exposed by [Mnemos](https://github.com/jhizzard/mnemos):
+Rumen is a **reasoning layer**, not a memory store. It assumes the schema exposed by [Mnestra](https://github.com/jhizzard/mnestra):
 
 - `memory_items(id, content, source_type, project, created_at, embedding vector(1536))`
 - `memory_sessions(id, project, summary, created_at)`
 - `memory_hybrid_search(query_text, query_embedding, limit_count, project_filter)` SQL function
 
-See [`docs/MNEMOS-COMPATIBILITY.md`](docs/MNEMOS-COMPATIBILITY.md) for the full compatibility contract. Future Rumen versions may abstract this; v0.1 only works with Mnemos-compatible schemas.
+See [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) for the full compatibility contract. Future Rumen versions may abstract this; v0.1 only works with Mnestra-compatible schemas.
 
-Mnemos stores your developer memory. Rumen learns from it while you're not looking, and writes new memories back into the store with `source_type='insight'` so every existing Mnemos consumer automatically benefits.
+Mnestra stores your developer memory. Rumen learns from it while you're not looking, and writes new memories back into the store with `source_type='insight'` so every existing Mnestra consumer automatically benefits.
 
 ---
 
@@ -50,7 +50,7 @@ Mnemos stores your developer memory. Rumen learns from it while you're not looki
 npm install @jhizzard/rumen
 ```
 
-Peer requirement: a Postgres database with the `vector` extension and the Mnemos schema (migrations in the Mnemos repo).
+Peer requirement: a Postgres database with the `vector` extension and the Mnestra schema (migrations in the Mnestra repo).
 
 ---
 
@@ -87,7 +87,7 @@ Rumen is designed to run as a scheduled Supabase Edge Function, triggered by `pg
 
 ### Connection URL convention
 
-Per [`docs/MNEMOS-COMPATIBILITY.md`](docs/MNEMOS-COMPATIBILITY.md) and the operational lessons inherited from Podium, Rumen always uses Supabase **Shared Pooler IPv4** URLs, never Dedicated Pooler. The URL format:
+Per [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) and the operational lessons inherited from Podium, Rumen always uses Supabase **Shared Pooler IPv4** URLs, never Dedicated Pooler. The URL format:
 
 ```
 postgresql://postgres.<project-ref>:<encoded-pw>@aws-0-<region>.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1

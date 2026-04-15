@@ -1,6 +1,6 @@
 -- Rumen v0.1 schema
 -- Non-destructive: creates three new tables under the rumen_ namespace.
--- Does NOT modify or reference Mnemos's existing memory_items / memory_sessions tables.
+-- Does NOT modify or reference Mnestra's existing memory_items / memory_sessions tables.
 --
 -- Apply with:
 --   psql "$DIRECT_URL" -f migrations/001_rumen_tables.sql

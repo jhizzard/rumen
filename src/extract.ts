@@ -1,7 +1,7 @@
 /**
  * Rumen v0.1 — Extract phase.
  *
- * Pulls recent session memories out of Mnemos's memory_sessions + memory_items
+ * Pulls recent session memories out of Mnestra's memory_sessions + memory_items
  * tables, filters trivial sessions, skips sessions already processed by a
  * previous Rumen job, and returns structured signals for the Relate phase.
  *
@@ -28,7 +28,7 @@ export interface ExtractResult {
 }
 
 /**
- * Pull candidate sessions from Mnemos, filter them, and build signals.
+ * Pull candidate sessions from Mnestra, filter them, and build signals.
  */
 export async function extractSignals(
   pool: PgPool,

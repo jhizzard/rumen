@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the same insight rows as v0.1 — so the loop remains testable without a
   Anthropic account.
 - **CI integration test.** New `integration-test` job in `.github/workflows/ci.yml`
-  spins up an ephemeral Postgres 16, applies `tests/fixtures/mnemos-minimal.sql`
+  spins up an ephemeral Postgres 16, applies `tests/fixtures/mnestra-minimal.sql`
   + `migrations/001_rumen_tables.sql`, and runs `scripts/test-locally.ts`
   end-to-end. Asserts at least one `rumen_insights` row is produced.
 - `Insight` and `SynthesizeContext` types exported from `src/types.ts` for
@@ -53,7 +53,7 @@ Initial release. Extract + Relate + Surface only — no LLM synthesis, no questi
 
 ### Added
 - `runRumenJob(db, options)` entry point that runs the Extract, Relate, and Surface phases end-to-end.
-- Extract phase (`src/extract.ts`): pulls session memories from the last 24–72 hours out of Mnemos's `memory_sessions` + `memory_items` tables, filters out sessions with fewer than 3 events, and returns structured signals.
+- Extract phase (`src/extract.ts`): pulls session memories from the last 24–72 hours out of Mnestra's `memory_sessions` + `memory_items` tables, filters out sessions with fewer than 3 events, and returns structured signals.
 - Relate phase (`src/relate.ts`): for each signal, runs `memory_hybrid_search` across all historical memories and keeps top-5 candidates with similarity > 0.7.
 - Surface phase (`src/surface.ts`): writes a non-destructive `rumen_insights` row per signal with `source_memory_ids[]` populated. v0.1 uses placeholder insight text; v0.2 will replace this with LLM synthesis.
 - SQL migrations:
@@ -64,7 +64,7 @@ Initial release. Extract + Relate + Surface only — no LLM synthesis, no questi
 - Raw `pg` Pool factory at `src/db.ts` wired for Supabase Shared Pooler IPv4 URLs.
 - `[rumen-*]` logging convention enforced across the codebase (`[rumen]`, `[rumen-extract]`, `[rumen-relate]`, `[rumen-surface]`, with `[rumen-synthesize]` and `[rumen-question]` reserved).
 - Cost guardrails (hardcoded in v0.1): max 10 sessions per run via `MAX_SESSIONS_PER_RUN`, skip sessions with <3 events, skip sessions that already have a `rumen_jobs` row.
-- Mnemos compatibility document at `docs/MNEMOS-COMPATIBILITY.md`.
+- Mnestra compatibility document at `docs/MNESTRA-COMPATIBILITY.md`.
 - CI workflow that runs `tsc --noEmit` and a basic SQL syntax check.
 
 ### Not included (by design)
