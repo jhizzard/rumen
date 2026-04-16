@@ -1,13 +1,16 @@
 /**
- * Rumen v0.1 — Extract phase.
+ * Rumen v0.3 — Extract phase.
  *
- * Pulls recent session memories out of Mnestra's memory_sessions + memory_items
- * tables, filters trivial sessions, skips sessions already processed by a
- * previous Rumen job, and returns structured signals for the Relate phase.
+ * Pulls recent sessions out of Mnestra's memory_items table by grouping on
+ * source_session_id. Prior versions joined to memory_sessions on its UUID
+ * primary key, but in rag-system's actual schema memory_items.source_session_id
+ * references a separate ID space (the Claude Code session identifier) and
+ * never matches memory_sessions.id. Grouping memory_items directly is both
+ * correct and simpler — the session grouping is the source_session_id value
+ * itself, and memory_sessions is ignored by Rumen.
  *
- * v0.1 is deliberately simple: one signal per session, built from the session
- * summary + a short rollup of its memory_items. v0.2 will produce multiple
- * signals per session via LLM extraction.
+ * v0.3 still emits one signal per session. v0.4 will add multiple signals per
+ * session via LLM extraction.
  */
 
 import type { PgPool } from './db.js';
@@ -45,27 +48,31 @@ export async function extractSignals(
       minEventCount,
   );
 
-  // 1. Pull recent sessions with their event counts. We deliberately fetch a
-  //    little more than maxSessions so we have headroom after filtering.
+  // 1. Group memory_items by source_session_id, filter to sessions whose
+  //    earliest item falls inside the lookback window, and keep those with
+  //    enough events to be worth processing. We fetch a little more than
+  //    maxSessions so we have headroom after the "already processed" filter.
   let candidates: MemorySession[];
   try {
     const fetchLimit = maxSessions * 4;
     const res = await pool.query<MemorySession>(
       `
         SELECT
-          s.id,
-          s.project,
-          s.summary,
-          s.created_at,
-          COALESCE(COUNT(m.id), 0)::int AS event_count
-        FROM memory_sessions s
-        LEFT JOIN memory_items m ON m.session_id = s.id
-        WHERE s.created_at >= NOW() - ($1 || ' hours')::interval
-        GROUP BY s.id
-        ORDER BY s.created_at DESC
+          m.source_session_id                AS id,
+          (ARRAY_AGG(m.project))[1]          AS project,
+          NULL::text                         AS summary,
+          MIN(m.created_at)                  AS created_at,
+          COUNT(*)::int                      AS event_count
+        FROM memory_items m
+        WHERE m.source_session_id IS NOT NULL
+          AND m.is_active = TRUE
+        GROUP BY m.source_session_id
+        HAVING COUNT(*) >= $3
+           AND MIN(m.created_at) >= NOW() - ($1 || ' hours')::interval
+        ORDER BY MIN(m.created_at) DESC
         LIMIT $2
       `,
-      [String(lookbackHours), fetchLimit],
+      [String(lookbackHours), fetchLimit, minEventCount],
     );
     candidates = res.rows;
   } catch (err) {
@@ -174,26 +181,25 @@ async function buildSignal(
   pool: PgPool,
   session: MemorySession,
 ): Promise<RumenSignal | null> {
-  let searchText = (session.summary ?? '').trim();
-
-  if (searchText.length === 0) {
-    // Fall back to first ~5 memory_items of the session, concatenated.
-    const res = await pool.query<{ content: string }>(
-      `
-        SELECT content
-        FROM memory_items
-        WHERE session_id = $1
-        ORDER BY created_at ASC
-        LIMIT 5
-      `,
-      [session.id],
-    );
-    searchText = res.rows
-      .map((r) => r.content)
-      .join('\n')
-      .slice(0, 2000)
-      .trim();
-  }
+  // In v0.3 there is no per-session summary column — Rumen treats
+  // memory_items.source_session_id as the session key directly, so we always
+  // build the search text from a content rollup of the session's items.
+  const res = await pool.query<{ content: string }>(
+    `
+      SELECT content
+      FROM memory_items
+      WHERE source_session_id = $1
+        AND is_active = TRUE
+      ORDER BY created_at ASC
+      LIMIT 5
+    `,
+    [session.id],
+  );
+  const searchText = res.rows
+    .map((r) => r.content)
+    .join('\n')
+    .slice(0, 2000)
+    .trim();
 
   if (searchText.length === 0) {
     // Nothing to relate against. Skip.
@@ -202,7 +208,7 @@ async function buildSignal(
   }
 
   const description =
-    (session.summary ?? '').trim().slice(0, 240) ||
+    searchText.slice(0, 240) ||
     'Session ' + session.id + ' in ' + (session.project ?? 'unknown project');
 
   return {

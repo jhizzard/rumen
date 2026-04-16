@@ -1,9 +1,11 @@
--- Rumen v0.1 schema
--- Non-destructive: creates three new tables under the rumen_ namespace.
+-- Rumen schema — self-healing migration.
+-- Non-destructive: creates three new tables under the rumen_ namespace and
+-- brings any pre-existing tables (from partial prior installs) up to the
+-- current shape via ALTER TABLE ADD COLUMN IF NOT EXISTS.
 -- Does NOT modify or reference Mnestra's existing memory_items / memory_sessions tables.
 --
 -- Apply with:
---   psql "$DIRECT_URL" -f migrations/001_rumen_tables.sql
+--   psql "$DATABASE_URL" -f migrations/001_rumen_tables.sql
 
 BEGIN;
 
@@ -22,6 +24,21 @@ CREATE TABLE IF NOT EXISTS rumen_jobs (
   started_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   completed_at          TIMESTAMPTZ
 );
+
+-- Backfill columns for schema drift from earlier install attempts.
+-- CREATE TABLE IF NOT EXISTS is a no-op on existing tables, so without this
+-- block the subsequent CREATE INDEX statements would fail on columns that
+-- never got added.
+ALTER TABLE rumen_jobs
+  ADD COLUMN IF NOT EXISTS triggered_by         TEXT,
+  ADD COLUMN IF NOT EXISTS status               TEXT,
+  ADD COLUMN IF NOT EXISTS sessions_processed   INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS insights_generated   INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS questions_generated  INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS error_message        TEXT,
+  ADD COLUMN IF NOT EXISTS source_session_ids   UUID[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS started_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ADD COLUMN IF NOT EXISTS completed_at         TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_rumen_jobs_status
   ON rumen_jobs (status);
@@ -48,6 +65,15 @@ CREATE TABLE IF NOT EXISTS rumen_insights (
   acted_upon            BOOLEAN NOT NULL DEFAULT FALSE,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE rumen_insights
+  ADD COLUMN IF NOT EXISTS job_id               UUID,
+  ADD COLUMN IF NOT EXISTS source_memory_ids    UUID[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS projects             TEXT[] NOT NULL DEFAULT '{}',
+  ADD COLUMN IF NOT EXISTS insight_text         TEXT,
+  ADD COLUMN IF NOT EXISTS confidence           NUMERIC(4, 3) NOT NULL DEFAULT 0.000,
+  ADD COLUMN IF NOT EXISTS acted_upon           BOOLEAN NOT NULL DEFAULT FALSE,
+  ADD COLUMN IF NOT EXISTS created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS idx_rumen_insights_job_id
   ON rumen_insights (job_id);
@@ -77,6 +103,16 @@ CREATE TABLE IF NOT EXISTS rumen_questions (
   answer                TEXT,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE rumen_questions
+  ADD COLUMN IF NOT EXISTS job_id               UUID,
+  ADD COLUMN IF NOT EXISTS session_id           UUID,
+  ADD COLUMN IF NOT EXISTS question             TEXT,
+  ADD COLUMN IF NOT EXISTS context              TEXT,
+  ADD COLUMN IF NOT EXISTS asked_at             TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS answered_at          TIMESTAMPTZ,
+  ADD COLUMN IF NOT EXISTS answer               TEXT,
+  ADD COLUMN IF NOT EXISTS created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW();
 
 CREATE INDEX IF NOT EXISTS idx_rumen_questions_job_id
   ON rumen_questions (job_id);

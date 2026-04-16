@@ -50,13 +50,19 @@ export interface MemoryItem {
    */
 }
 
-/** A session from Mnestra's `memory_sessions` table. */
+/**
+ * A session as seen by Rumen — since v0.3, this is a synthetic grouping over
+ * memory_items by source_session_id, not a row from memory_sessions. The `id`
+ * field is the source_session_id value (text, typically a UUID string);
+ * `summary` is always null in v0.3 and reserved for a future LLM-generated
+ * summary.
+ */
 export interface MemorySession {
   id: string;
   project: string | null;
   summary: string | null;
   created_at: string;
-  /** Number of memory_items rows referencing this session. */
+  /** Number of memory_items rows in this source_session_id grouping. */
   event_count: number;
 }
 

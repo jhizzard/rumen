@@ -286,13 +286,38 @@ function parseBatchResponse(text: string): Map<string, ParsedInsight> {
     console.warn('[rumen-synthesize] could not locate JSON in model response');
     return out;
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(jsonText);
-  } catch (err) {
-    console.warn('[rumen-synthesize] JSON parse failed:', err);
+
+  // Stage 1: strict parse.
+  let parsed: unknown = tryParse(jsonText);
+
+  // Stage 2: strip trailing commas (common Haiku malformation) and retry.
+  if (parsed === undefined) {
+    const repaired = jsonText.replace(/,(\s*[}\]])/g, '$1');
+    parsed = tryParse(repaired);
+    if (parsed !== undefined) {
+      console.warn('[rumen-synthesize] recovered via trailing-comma strip');
+    }
+  }
+
+  // Stage 3: per-object regex extraction — salvages well-formed siblings when
+  // one object in the array has a syntax error (unescaped quote, etc).
+  if (parsed === undefined) {
+    const salvaged = salvageInsightObjects(jsonText);
+    if (salvaged.length > 0) {
+      console.warn(
+        '[rumen-synthesize] recovered ' +
+          salvaged.length +
+          ' insight(s) via per-object regex fallback',
+      );
+      parsed = { insights: salvaged };
+    }
+  }
+
+  if (parsed === undefined) {
+    console.warn('[rumen-synthesize] JSON parse failed at all three stages');
     return out;
   }
+
   if (
     typeof parsed !== 'object' ||
     parsed === null ||
@@ -312,6 +337,57 @@ function parseBatchResponse(text: string): Map<string, ParsedInsight> {
     out.set(obj.key, { text: obj.text.trim(), cited_ids: citedIds });
   }
   return out;
+}
+
+function tryParse(s: string): unknown | undefined {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Scan for individual insight objects inside a malformed JSON array.
+ * Matches `{ "key": "...", "text": "...", "cited_ids": [...] }` regardless of
+ * field order. One malformed sibling no longer poisons the whole batch.
+ */
+function salvageInsightObjects(
+  jsonText: string,
+): Array<{ key: string; text: string; cited_ids: string[] }> {
+  const results: Array<{ key: string; text: string; cited_ids: string[] }> = [];
+  // Find balanced { ... } blocks, then try to parse each one.
+  let depth = 0;
+  let start = -1;
+  for (let i = 0; i < jsonText.length; i++) {
+    const ch = jsonText[i];
+    if (ch === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const chunk = jsonText.slice(start, i + 1);
+        // Repair trailing commas inside this chunk and attempt parse.
+        const repaired = chunk.replace(/,(\s*[}\]])/g, '$1');
+        const obj = tryParse(repaired) as
+          | { key?: unknown; text?: unknown; cited_ids?: unknown }
+          | undefined;
+        if (
+          obj &&
+          typeof obj.key === 'string' &&
+          typeof obj.text === 'string'
+        ) {
+          const citedIds = Array.isArray(obj.cited_ids)
+            ? obj.cited_ids.filter((x): x is string => typeof x === 'string')
+            : [];
+          results.push({ key: obj.key, text: obj.text, cited_ids: citedIds });
+        }
+        start = -1;
+      }
+    }
+  }
+  return results;
 }
 
 function extractJsonBlock(text: string): string | null {
