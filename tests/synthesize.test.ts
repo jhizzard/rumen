@@ -13,7 +13,10 @@ import assert from 'node:assert/strict';
 import {
   createSynthesizeContext,
   makePlaceholderInsight,
+  repairCommonJsonIssues,
+  sliceFirstJsonBlock,
   synthesizeInsights,
+  tryParseInsight,
 } from '../src/synthesize.ts';
 import {
   makeMockAnthropic,
@@ -516,6 +519,88 @@ test('AnthropicLike: the exported interface is sufficient for a test double', as
 });
 
 // ── Signals with no related memories are dropped ────────────────────────────
+
+// ── tryParseInsight: 3-pass JSON hardening (Sprint 26 T2) ───────────────────
+//
+// These six fixtures exercise the recovery passes in isolation. They run
+// against `tryParseInsight` directly rather than going through the full
+// synthesizeInsights pipeline, so a regression in any single pass surfaces as
+// a focused failure.
+
+test('tryParseInsight (pass 1): clean JSON parses on the strict path', () => {
+  const raw = '{"insights":[{"key":"a","text":"hi","cited_ids":[]}]}';
+  const parsed = tryParseInsight(raw) as { insights: unknown[] } | null;
+  assert.ok(parsed && Array.isArray(parsed.insights));
+  assert.equal(parsed.insights.length, 1);
+});
+
+test('tryParseInsight (pass 2 slice): trailing prose after the JSON is ignored', () => {
+  const raw =
+    '{"insights":[{"key":"a","text":"hi","cited_ids":[]}]} \n\nLet me know if you need anything else!';
+  const parsed = tryParseInsight(raw) as { insights: unknown[] } | null;
+  assert.ok(parsed, 'expected slice pass to recover the JSON block');
+  assert.ok(Array.isArray(parsed!.insights));
+  assert.equal(parsed!.insights.length, 1);
+  // Sanity: sliceFirstJsonBlock returns just the brace-balanced prefix.
+  const sliced = sliceFirstJsonBlock(raw);
+  assert.equal(
+    sliced,
+    '{"insights":[{"key":"a","text":"hi","cited_ids":[]}]}',
+  );
+});
+
+test('tryParseInsight (pass 2 fence): ```json\\n...\\n``` markdown fences are stripped', () => {
+  const raw =
+    '```json\n{"insights":[{"key":"a","text":"fenced","cited_ids":[]}]}\n```';
+  const parsed = tryParseInsight(raw) as
+    | { insights: Array<{ text: string }> }
+    | null;
+  assert.ok(parsed, 'expected fence pass to recover the JSON');
+  assert.equal(parsed!.insights[0]!.text, 'fenced');
+});
+
+test('tryParseInsight (pass 3 repair): trailing comma is stripped', () => {
+  const raw = '{ "x": 1, }';
+  // Suppress the "recovered via trailing-comma strip / newline escape" warn.
+  const origWarn = console.warn;
+  console.warn = () => {};
+  let parsed: unknown;
+  try {
+    parsed = tryParseInsight(raw);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.deepEqual(parsed, { x: 1 });
+});
+
+test('tryParseInsight (pass 3 repair): literal newline inside a string value is escaped', () => {
+  const raw = '{ "msg": "line1\nline2" }';
+  // Pass 1 fails because raw \n inside a JSON string is invalid; pass 3
+  // walks string state and escapes it to \\n.
+  const origWarn = console.warn;
+  console.warn = () => {};
+  let parsed: unknown;
+  try {
+    parsed = tryParseInsight(raw);
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.deepEqual(parsed, { msg: 'line1\nline2' });
+});
+
+test('tryParseInsight: unrecoverable truncation returns null (caller falls back to placeholder)', () => {
+  const raw = '{ "broken: "missing quote';
+  const parsed = tryParseInsight(raw);
+  assert.equal(parsed, null);
+});
+
+// repairCommonJsonIssues smoke test — make sure the helper is importable and
+// behaves as documented when called directly. Belt-and-braces protection
+// against future regressions if tryParseInsight grows another pass.
+test('repairCommonJsonIssues: applies both repairs in one pass', () => {
+  const repaired = repairCommonJsonIssues('{ "msg": "a\nb", }');
+  assert.equal(repaired, '{ "msg": "a\\nb" }');
+});
 
 test('synthesizeInsights: signals with zero related memories are filtered out upfront', async () => {
   const signals = [

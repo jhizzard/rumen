@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Planned
+- Wire `normalize()` from `src/confidence.ts` into the two `computeConfidence(rs)` call sites in `src/synthesize.ts` (lines 228 and 620) and update `synthesize.test.ts` fixtures to expect normalized values. Deferred from Sprint 26 because the orchestrator's one-line wrapper broke an existing computeConfidence test that asserted the unscaled value (`0.7 !== 1` on a small-cluster fixture). Belongs in a follow-up that touches both files together.
+
+## [0.4.2] - 2026-04-25
+
+### Added
+- **JSON parse hardening in `src/synthesize.ts`** — Haiku-synthesized-insight responses now go through a three-pass `tryParseInsight` strategy (strict JSON.parse → fence/slice extraction → comma + literal-newline repair) before falling back to the per-object regex rescue. Drops the placeholder fallback rate from the 19% (31/166) observed on the 2026-04-19 production kickstart toward < 5% on common Haiku malformations: trailing prose after the JSON, markdown code fences, trailing commas, literal newlines inside string values. Truly malformed responses still cleanly fall through to placeholder. Helpers (`tryParseInsight`, `sliceFirstJsonBlock`, `repairCommonJsonIssues`) are exported and unit-tested in isolation.
+- **`src/confidence.ts`** — pure `normalize(rawScore, contextSize)` function plus `NORMALIZE_VERSION` constant. Maps a raw 0..1 score onto a context-size-aware ceiling: 0.4 at size ≤ 1, 0.7 at < 5, 0.9 at < 15, full range at ≥ 15. Clamps NaN / out-of-range inputs. Currently exported only — integration into `synthesize.ts` is the Unreleased item above. Seven unit tests in `tests/relate.test.ts` cover the curve.
+
+### Changed
+- Test count grew from 49 → 56 with the new fixtures.
+
+## [0.4.1] - 2026-04-16
+
+### Added
+- Full test suite — 41 tests across extract, relate, synthesize, surface.
+- Rumen install guide (`docs/INSTALL.md`) and kickstart script.
+- README refresh covering v0.4 roadmap, hybrid Relate, and cost controls.
+- Hybrid Relate documentation: embedding behaviour, failure modes, and the
+  keyword-only fallback path.
+
+## [0.4.0] - 2026-04-16
+
+### Added
+- **Hybrid embeddings in Relate.** `relate.ts` now generates OpenAI
+  `text-embedding-3-large` embeddings per signal with per-signal error
+  tolerance: timeouts / 4xx / 5xx responses fall back to keyword-only
+  search rather than aborting the whole job.
+- **Self-healing migration.** `migrations/001_rumen_tables.sql` gains
+  `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` blocks so the schema upgrades
+  cleanly from v0.2 without a separate migration file.
+
+### Changed
+- `extract.ts`, `synthesize.ts`, and `types.ts` updated to carry the new
+  embedding vector through the pipeline.
+
+## [0.2.2] - 2026-04-14
+
+### Changed
+- **Renamed references from Mnemos → Mnestra.** Final naming after Ingram
+  was rejected (corporate sponsor conflict). Compatibility doc and SQL
+  fixture renamed; the scoped `@jhizzard/mnemos` package is deprecated.
+- SQL schema unchanged (`memory_*` tables stay the same).
+
+## [0.2.1] - 2026-04-14
+
+### Changed
+- Mnemos branding pass through README, CHANGELOG, and the compatibility
+  doc (`docs/ENGRAM-COMPATIBILITY.md` → `docs/MNEMOS-COMPATIBILITY.md`).
+
+## [0.2.0] - 2026-04-14
+
 ### Added
 - **Synthesize phase (`src/synthesize.ts`)** — replaces v0.1's placeholder
   insight text with real Claude Haiku generation. Wired into `runRumenJob`

@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { relateSignals } from '../src/relate.ts';
+import { normalize, NORMALIZE_VERSION } from '../src/confidence.ts';
 import type { RumenSignal } from '../src/types.ts';
 import { makeMockPool, quiet, type QueryCall } from './helpers.ts';
 
@@ -192,6 +193,54 @@ test('relateOne: rows with non-numeric similarity are silently dropped', async (
   );
   assert.equal(out[0]!.related.length, 1);
   assert.equal(out[0]!.related[0]!.id, 'valid');
+});
+
+// ---------------------------------------------------------------------------
+// confidence.normalize — pure-function unit tests (T3, Sprint 26).
+//
+// Curve (see src/confidence.ts):
+//   contextSize <= 1  → raw * 0.4
+//   contextSize <  5  → raw * 0.7
+//   contextSize < 15  → raw * 0.9
+//   contextSize >= 15 → raw
+// Non-finite raw → 0; raw outside [0,1] is clamped before scaling.
+// ---------------------------------------------------------------------------
+
+test('normalize: zero raw score → 0 regardless of context size', () => {
+  assert.equal(normalize(0, 10), 0);
+});
+
+test('normalize: single-source context (size=1) caps at 0.4 ceiling', () => {
+  // 0.5 * 0.4 = 0.2
+  assert.equal(normalize(0.5, 1), 0.2);
+});
+
+test('normalize: small cluster (size<5) caps at 0.7 ceiling', () => {
+  // 0.5 * 0.7 = 0.35
+  assert.equal(normalize(0.5, 3), 0.35);
+});
+
+test('normalize: medium cluster (size<15) caps at 0.9 ceiling', () => {
+  // 0.5 * 0.9 = 0.45
+  assert.equal(normalize(0.5, 10), 0.45);
+});
+
+test('normalize: large cluster (size>=15) reaches full range', () => {
+  assert.equal(normalize(0.5, 20), 0.5);
+});
+
+test('normalize: raw above 1 is clamped before scaling (1.5 @ size=10 → 0.9)', () => {
+  assert.equal(normalize(1.5, 10), 0.9);
+});
+
+test('normalize: NaN raw → 0', () => {
+  assert.equal(normalize(Number.NaN, 10), 0);
+});
+
+test('normalize: NORMALIZE_VERSION is exported and is an integer', () => {
+  assert.equal(typeof NORMALIZE_VERSION, 'number');
+  assert.ok(Number.isInteger(NORMALIZE_VERSION));
+  assert.ok(NORMALIZE_VERSION >= 1);
 });
 
 test('relateSignals: keyword-only mode (no OPENAI_API_KEY) binds NULL for query_embedding and semantic_weight=0', async () => {

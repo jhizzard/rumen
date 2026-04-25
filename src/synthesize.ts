@@ -281,28 +281,17 @@ interface ParsedInsight {
 
 function parseBatchResponse(text: string): Map<string, ParsedInsight> {
   const out = new Map<string, ParsedInsight>();
-  const jsonText = extractJsonBlock(text);
-  if (!jsonText) {
-    console.warn('[rumen-synthesize] could not locate JSON in model response');
-    return out;
-  }
 
-  // Stage 1: strict parse.
-  let parsed: unknown = tryParse(jsonText);
+  // Primary path: three-pass parse — strict → fence/slice → repair.
+  let parsed: unknown | null = tryParseInsight(text);
 
-  // Stage 2: strip trailing commas (common Haiku malformation) and retry.
-  if (parsed === undefined) {
-    const repaired = jsonText.replace(/,(\s*[}\]])/g, '$1');
-    parsed = tryParse(repaired);
-    if (parsed !== undefined) {
-      console.warn('[rumen-synthesize] recovered via trailing-comma strip');
-    }
-  }
-
-  // Stage 3: per-object regex extraction — salvages well-formed siblings when
-  // one object in the array has a syntax error (unescaped quote, etc).
-  if (parsed === undefined) {
-    const salvaged = salvageInsightObjects(jsonText);
+  // Per-object salvage runs when the primary path either failed or produced an
+  // unexpected shape (e.g. the slice pass returned a single bare insight
+  // object instead of the {insights:[...]} envelope). It scans the raw text
+  // for balanced `{...}` blocks and rescues the well-formed ones, so a single
+  // malformed sibling can no longer poison the whole batch.
+  if (!hasInsightsArray(parsed)) {
+    const salvaged = salvageInsightObjects(text);
     if (salvaged.length > 0) {
       console.warn(
         '[rumen-synthesize] recovered ' +
@@ -313,21 +302,12 @@ function parseBatchResponse(text: string): Map<string, ParsedInsight> {
     }
   }
 
-  if (parsed === undefined) {
+  if (!hasInsightsArray(parsed)) {
     console.warn('[rumen-synthesize] JSON parse failed at all three stages');
     return out;
   }
 
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    !Array.isArray((parsed as { insights?: unknown }).insights)
-  ) {
-    console.warn('[rumen-synthesize] model response missing insights[]');
-    return out;
-  }
-  const rows = (parsed as { insights: unknown[] }).insights;
-  for (const row of rows) {
+  for (const row of parsed.insights) {
     if (typeof row !== 'object' || row === null) continue;
     const obj = row as { key?: unknown; text?: unknown; cited_ids?: unknown };
     if (typeof obj.key !== 'string' || typeof obj.text !== 'string') continue;
@@ -339,12 +319,186 @@ function parseBatchResponse(text: string): Map<string, ParsedInsight> {
   return out;
 }
 
-function tryParse(s: string): unknown | undefined {
+function hasInsightsArray(p: unknown): p is { insights: unknown[] } {
+  return (
+    typeof p === 'object' &&
+    p !== null &&
+    Array.isArray((p as { insights?: unknown }).insights)
+  );
+}
+
+/**
+ * Three-pass tolerant JSON parser for Haiku-synthesized insight responses.
+ *
+ *   Pass 1 — strict `JSON.parse` of the raw response. Fast path for clean
+ *            responses (the common case).
+ *   Pass 2 — strip a markdown ```json fence; failing that, slice the first
+ *            balanced `{...}` or `[...]` block and ignore everything around
+ *            it. Handles "trailing prose after the JSON" and "fenced JSON".
+ *   Pass 3 — light repair of the sliced block (or the raw response if the
+ *            slice failed): strip trailing commas, escape literal newlines /
+ *            CRs / tabs that appear unescaped inside string values.
+ *
+ * Returns the first parse that succeeds, or `null` if all three passes fail.
+ * The caller is expected to fall back to a placeholder insight on `null`.
+ *
+ * Exported so it can be unit-tested in isolation — see tests/synthesize.test.ts.
+ */
+export function tryParseInsight(raw: string): unknown | null {
+  // Pass 1: strict.
   try {
-    return JSON.parse(s);
+    return JSON.parse(raw);
   } catch {
-    return undefined;
+    /* fall through */
   }
+
+  // Pass 2a: ```json ... ``` fence.
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fenced && fenced[1]) {
+    try {
+      return JSON.parse(fenced[1]);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  // Pass 2b: slice the first balanced `{...}` or `[...]` block.
+  const sliced = sliceFirstJsonBlock(raw);
+  if (sliced) {
+    try {
+      return JSON.parse(sliced);
+    } catch {
+      /* fall through */
+    }
+  }
+
+  // Pass 3: light repair on the sliced block (or raw, if slicing failed).
+  const repaired = repairCommonJsonIssues(sliced ?? raw);
+  if (repaired) {
+    try {
+      const result = JSON.parse(repaired);
+      console.warn(
+        '[rumen-synthesize] recovered via trailing-comma strip / newline escape',
+      );
+      return result;
+    } catch {
+      /* give up */
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Walk `s` from the first `{` or `[` and return the substring through the
+ * matching closing brace/bracket. Tracks string state and backslash escapes
+ * so braces inside string values do not throw the depth count off. Returns
+ * `null` if no opener is found or the block never closes (truncation).
+ *
+ * Exported for direct unit testing.
+ */
+export function sliceFirstJsonBlock(s: string): string | null {
+  let openChar: '{' | '[' | null = null;
+  let closeChar: '}' | ']' | null = null;
+  let start = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '{' || ch === '[') {
+      openChar = ch;
+      closeChar = ch === '{' ? '}' : ']';
+      start = i;
+      break;
+    }
+  }
+  if (start === -1 || !openChar || !closeChar) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') escape = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === openChar) depth += 1;
+    else if (ch === closeChar) {
+      depth -= 1;
+      if (depth === 0) {
+        return s.slice(start, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Apply two common JSON repairs and return the result. The repairs are:
+ *
+ *   1. Strip trailing commas immediately before `}` or `]`. Trailing commas
+ *      are valid JS but invalid JSON, and Haiku emits them often.
+ *   2. Escape literal newlines, carriage returns, and tabs that appear
+ *      unescaped inside string values. Walks character-by-character and
+ *      tracks string state so non-string whitespace is left alone.
+ *
+ * Always returns a string (possibly identical to the input). Returns `null`
+ * only when the input is empty.
+ *
+ * Exported for direct unit testing.
+ */
+export function repairCommonJsonIssues(s: string): string | null {
+  if (s.length === 0) return null;
+
+  // Step 1: strip trailing commas.
+  const noTrailingCommas = s.replace(/,(\s*[}\]])/g, '$1');
+
+  // Step 2: escape literal newlines/CR/TAB inside string values.
+  let out = '';
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < noTrailingCommas.length; i++) {
+    const ch = noTrailingCommas[i]!;
+    if (escape) {
+      out += ch;
+      escape = false;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\\') {
+        out += ch;
+        escape = true;
+      } else if (ch === '"') {
+        out += ch;
+        inString = false;
+      } else if (ch === '\n') {
+        out += '\\n';
+      } else if (ch === '\r') {
+        out += '\\r';
+      } else if (ch === '\t') {
+        out += '\\t';
+      } else {
+        out += ch;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      out += ch;
+      inString = true;
+      continue;
+    }
+    out += ch;
+  }
+
+  return out;
 }
 
 /**
@@ -370,9 +524,14 @@ function salvageInsightObjects(
         const chunk = jsonText.slice(start, i + 1);
         // Repair trailing commas inside this chunk and attempt parse.
         const repaired = chunk.replace(/,(\s*[}\]])/g, '$1');
-        const obj = tryParse(repaired) as
+        let obj:
           | { key?: unknown; text?: unknown; cited_ids?: unknown }
           | undefined;
+        try {
+          obj = JSON.parse(repaired);
+        } catch {
+          obj = undefined;
+        }
         if (
           obj &&
           typeof obj.key === 'string' &&
@@ -388,19 +547,6 @@ function salvageInsightObjects(
     }
   }
   return results;
-}
-
-function extractJsonBlock(text: string): string | null {
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fenced && fenced[1]) {
-    return fenced[1].trim();
-  }
-  const firstBrace = text.indexOf('{');
-  const lastBrace = text.lastIndexOf('}');
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    return text.slice(firstBrace, lastBrace + 1);
-  }
-  return null;
 }
 
 function filterValidCitations(
