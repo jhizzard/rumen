@@ -30,6 +30,7 @@
  */
 
 import Anthropic from '@anthropic-ai/sdk';
+import { normalize as normalizeConfidence } from './confidence.js';
 import type {
   Insight,
   RelatedMemory,
@@ -225,7 +226,7 @@ async function synthesizeBatch(
     out.push({
       source: rs,
       insight_text: match.text,
-      confidence: computeConfidence(rs),
+      confidence: normalizeConfidence(computeConfidence(rs), rs.related.length),
       source_memory_ids:
         validCitedIds.length > 0 ? validCitedIds : rs.related.map((r) => r.id),
       synthesized: true,
@@ -563,7 +564,7 @@ function filterValidCitations(
   return out;
 }
 
-function computeConfidence(rs: RelatedSignal): number {
+export function computeConfidence(rs: RelatedSignal): number {
   if (rs.related.length === 0) return 0;
 
   const maxSim = rs.related.reduce((m, r) => Math.max(m, r.similarity), 0);
@@ -617,7 +618,7 @@ export function makePlaceholderInsight(rs: RelatedSignal): Insight {
   return {
     source: rs,
     insight_text: text,
-    confidence: computeConfidence(rs),
+    confidence: normalizeConfidence(computeConfidence(rs), rs.related.length),
     source_memory_ids: rs.related.map((r) => r.id),
     synthesized: false,
   };

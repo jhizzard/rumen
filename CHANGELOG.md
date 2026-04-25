@@ -7,8 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Planned
-- Wire `normalize()` from `src/confidence.ts` into the two `computeConfidence(rs)` call sites in `src/synthesize.ts` (lines 228 and 620) and update `synthesize.test.ts` fixtures to expect normalized values. Deferred from Sprint 26 because the orchestrator's one-line wrapper broke an existing computeConfidence test that asserted the unscaled value (`0.7 !== 1` on a small-cluster fixture). Belongs in a follow-up that touches both files together.
+_No unreleased changes._
+
+## [0.4.3] - 2026-04-25
+
+### Changed
+- **Confidence scores are now context-size-normalized.** The two `confidence: computeConfidence(rs)` call sites in `src/synthesize.ts` (lines 228 and 620) are now wrapped with `normalize(computeConfidence(rs), rs.related.length)`. Insights synthesized from small clusters (≤ 1, < 5, < 15 related memories) land at the lower ceilings the v0.4.2 `confidence.ts` curve specified — the raw `computeConfidence` output is unchanged, but the value that ends up on the Insight object now caps appropriately. Existing `rumen_insights` rows are unaffected; new ones land at the normalized scale.
+- `computeConfidence` is now exported from `src/synthesize.ts` so the test suite can verify the raw function directly. The five `computeConfidence: …` tests now call `computeConfidence(rs)` instead of `makePlaceholderInsight(rs).confidence` and assert the unscaled values they were always meant to. Two new integration tests verify the wrapped-and-normalized confidence on the placeholder path.
+
+### Notes
+- This is the deferred Sprint 26 T3 integration that landed in v0.4.2 with the pure function only. Sprint 27 closed the loop. `npm test` 58/58 green.
 
 ## [0.4.2] - 2026-04-25
 

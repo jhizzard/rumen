@@ -11,6 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  computeConfidence,
   createSynthesizeContext,
   makePlaceholderInsight,
   repairCommonJsonIssues,
@@ -18,6 +19,7 @@ import {
   synthesizeInsights,
   tryParseInsight,
 } from '../src/synthesize.ts';
+import { normalize as normalizeConfidence } from '../src/confidence.ts';
 import {
   makeMockAnthropic,
   makeRelatedMemory,
@@ -335,8 +337,8 @@ test('computeConfidence: single-project same-day → only maxSimilarity contribu
       }),
     ],
   });
-  // 0.5 * 0.8 + 0.3 * 0 + 0.2 * 0 = 0.4
-  assert.equal(makePlaceholderInsight(rs).confidence, 0.4);
+  // 0.5 * 0.8 + 0.3 * 0 + 0.2 * 0 = 0.4 (raw, pre-normalization)
+  assert.equal(computeConfidence(rs), 0.4);
 });
 
 test('computeConfidence: cross-project recent → crossProjectBonus is full', () => {
@@ -356,8 +358,8 @@ test('computeConfidence: cross-project recent → crossProjectBonus is full', ()
       }),
     ],
   });
-  // 0.5 * 0.9 + 0.3 * 1 + 0.2 * 0 = 0.75
-  assert.equal(makePlaceholderInsight(rs).confidence, 0.75);
+  // 0.5 * 0.9 + 0.3 * 1 + 0.2 * 0 = 0.75 (raw, pre-normalization)
+  assert.equal(computeConfidence(rs), 0.75);
 });
 
 test('computeConfidence: same-project wide-age-spread → ageSpreadBonus maxes', () => {
@@ -377,8 +379,8 @@ test('computeConfidence: same-project wide-age-spread → ageSpreadBonus maxes',
       }),
     ],
   });
-  // 0.5 * 0.5 + 0.3 * 0 + 0.2 * 1 = 0.45
-  assert.equal(makePlaceholderInsight(rs).confidence, 0.45);
+  // 0.5 * 0.5 + 0.3 * 0 + 0.2 * 1 = 0.45 (raw, pre-normalization)
+  assert.equal(computeConfidence(rs), 0.45);
 });
 
 test('computeConfidence: all bonuses → composite of all three terms', () => {
@@ -398,12 +400,44 @@ test('computeConfidence: all bonuses → composite of all three terms', () => {
       }),
     ],
   });
-  // 0.5 * 1.0 + 0.3 * 1 + 0.2 * 1 = 1.0 (clamped)
-  assert.equal(makePlaceholderInsight(rs).confidence, 1.0);
+  // 0.5 * 1.0 + 0.3 * 1 + 0.2 * 1 = 1.0 (raw, clamped, pre-normalization)
+  assert.equal(computeConfidence(rs), 1.0);
 });
 
 test('computeConfidence: zero related memories → 0 confidence', () => {
   const rs = makeRelatedSignal({ related: [] });
+  assert.equal(computeConfidence(rs), 0);
+});
+
+// ── Confidence normalization integration ────────────────────────────────────
+
+test('makePlaceholderInsight: confidence is normalized by cluster size', () => {
+  // 2 related memories with all bonuses → raw 1.0 → normalize(1.0, 2) = 0.7
+  const rs = makeRelatedSignal({
+    related: [
+      makeRelatedMemory({
+        id: ID_A,
+        project: 'alpha',
+        similarity: 1.0,
+        created_at: '2026-01-01T00:00:00Z',
+      }),
+      makeRelatedMemory({
+        id: ID_B,
+        project: 'beta',
+        similarity: 0.9,
+        created_at: '2026-03-01T00:00:00Z',
+      }),
+    ],
+  });
+  const raw = computeConfidence(rs);
+  const expected = normalizeConfidence(raw, rs.related.length);
+  assert.equal(makePlaceholderInsight(rs).confidence, expected);
+  assert.equal(expected, 0.7); // documents the curve at size=2 (clamped to 0.7 ceiling for size <5)
+});
+
+test('makePlaceholderInsight: zero related → confidence 0 even after normalize', () => {
+  const rs = makeRelatedSignal({ related: [] });
+  // computeConfidence returns 0; normalize(0, 0) returns 0 * 0.4 = 0
   assert.equal(makePlaceholderInsight(rs).confidence, 0);
 });
 
