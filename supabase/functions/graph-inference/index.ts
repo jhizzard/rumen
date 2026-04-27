@@ -25,7 +25,15 @@
 // @ts-ignore  Deno std import resolved at runtime.
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 // @ts-ignore  npm specifier resolved at runtime.
-import { Pool } from 'npm:pg@8.11.3';
+// Deno-friendly postgres client (postgres.js).  npm:pg@8.x has Node-native
+// crypto/net deps that don't bundle in the Supabase Edge Runtime — caused
+// BOOT_ERROR on first deploy 2026-04-27 ~19:35 ET.  postgres.js is pure JS,
+// works in Deno without polyfills.
+import postgres from 'npm:postgres@3.4.4';
+
+// Minimal API surface we use, typed loosely so the @ts-ignore stays narrow.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Sql = any;
 
 // @ts-ignore  Deno global available at runtime.
 declare const Deno: { env: { get: (k: string) => string | undefined } };
@@ -86,23 +94,23 @@ interface CandidatePair {
   target_project: string | null;
 }
 
-async function fetchSince(pool: Pool): Promise<string | null> {
-  const result = await pool.query(
+async function fetchSince(sql: Sql): Promise<string | null> {
+  const result = await sql.unsafe(
     `SELECT max(inferred_at) AS since FROM memory_relationships WHERE inferred_by ILIKE 'cron-%'`,
   );
-  const row = result.rows[0];
+  const row = result[0];
   if (!row || !row.since) return null;
   return new Date(row.since).toISOString();
 }
 
 async function fetchCandidatePairs(
-  pool: Pool,
+  sql: Sql,
   threshold: number,
   since: string | null,
   maxPairs: number,
 ): Promise<CandidatePair[]> {
   const distanceCutoff = 1 - threshold;
-  const result = await pool.query(
+  const result = await sql.unsafe(
     `
       SELECT
         m1.id          AS source_id,
@@ -130,7 +138,7 @@ async function fetchCandidatePairs(
     `,
     [distanceCutoff, since, maxPairs],
   );
-  return result.rows as CandidatePair[];
+  return result as unknown as CandidatePair[];
 }
 
 async function classifyPair(
@@ -180,12 +188,12 @@ Return ONLY the type token, no explanation.`;
 }
 
 async function upsertEdge(
-  pool: Pool,
+  sql: Sql,
   pair: CandidatePair,
   relationshipType: string,
   inferredBy: string,
 ): Promise<'inserted' | 'refreshed' | 'skipped'> {
-  const result = await pool.query(
+  const result = await sql.unsafe(
     `
       INSERT INTO memory_relationships (
         source_id, target_id, relationship_type, weight, inferred_at, inferred_by
@@ -201,8 +209,8 @@ async function upsertEdge(
     `,
     [pair.source_id, pair.target_id, relationshipType, pair.similarity, inferredBy],
   );
-  if (result.rowCount === 0) return 'skipped';
-  return result.rows[0].inserted ? 'inserted' : 'refreshed';
+  if (result.length === 0) return 'skipped';
+  return result[0].inserted ? 'inserted' : 'refreshed';
 }
 
 function isMissingColumnError(err: unknown): boolean {
@@ -216,7 +224,7 @@ function isMissingColumnError(err: unknown): boolean {
   );
 }
 
-export async function runGraphInference(pool: Pool): Promise<InferenceSummary> {
+export async function runGraphInference(sql: Sql): Promise<InferenceSummary> {
   const start = Date.now();
   const summary: InferenceSummary = {
     ok: false,
@@ -237,7 +245,7 @@ export async function runGraphInference(pool: Pool): Promise<InferenceSummary> {
   const inferredBy = inferredByTag(new Date());
 
   try {
-    summary.since = await fetchSince(pool);
+    summary.since = await fetchSince(sql);
   } catch (err) {
     if (isMissingColumnError(err)) {
       summary.error = 'awaiting migration 009';
@@ -247,7 +255,7 @@ export async function runGraphInference(pool: Pool): Promise<InferenceSummary> {
     throw err;
   }
 
-  const candidates = await fetchCandidatePairs(pool, threshold, summary.since, maxPairs);
+  const candidates = await fetchCandidatePairs(sql, threshold, summary.since, maxPairs);
   summary.candidates_scanned = candidates.length;
 
   for (const pair of candidates) {
@@ -255,7 +263,7 @@ export async function runGraphInference(pool: Pool): Promise<InferenceSummary> {
     let isNewEdge = false;
 
     try {
-      const outcome = await upsertEdge(pool, pair, relationshipType, inferredBy);
+      const outcome = await upsertEdge(sql, pair, relationshipType, inferredBy);
       if (outcome === 'skipped') continue;
       isNewEdge = outcome === 'inserted';
       if (outcome === 'inserted') summary.edges_inserted++;
@@ -278,7 +286,7 @@ export async function runGraphInference(pool: Pool): Promise<InferenceSummary> {
       const classified = await classifyPair(apiKey, pair);
       if (classified && classified !== relationshipType) {
         try {
-          await upsertEdge(pool, pair, classified, inferredBy);
+          await upsertEdge(sql, pair, classified, inferredBy);
           summary.llm_classifications++;
         } catch {
           summary.llm_failures++;
@@ -306,11 +314,11 @@ serve(async (_req: Request) => {
     );
   }
 
-  const pool = new Pool({ connectionString: url, max: 4 });
+  const sql = postgres(url, { max: 4, prepare: false });
 
   try {
     console.log('[graph-inference] tick starting');
-    const summary = await runGraphInference(pool);
+    const summary = await runGraphInference(sql);
     console.log(
       `[graph-inference] tick complete inserted=${summary.edges_inserted} refreshed=${summary.edges_refreshed} ms=${summary.ms_total}`,
     );
@@ -327,9 +335,9 @@ serve(async (_req: Request) => {
     );
   } finally {
     try {
-      await pool.end();
+      await sql.end();
     } catch (err) {
-      console.error('[graph-inference] pool.end() failed:', err);
+      console.error('[graph-inference] sql.end() failed:', err);
     }
   }
 });
