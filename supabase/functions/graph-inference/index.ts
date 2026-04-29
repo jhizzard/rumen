@@ -21,6 +21,7 @@
 //   supabase secrets set GRAPH_INFERENCE_THRESHOLD=0.85
 //   supabase secrets set GRAPH_INFERENCE_MAX_LLM_CALLS=200
 //   supabase secrets set GRAPH_INFERENCE_MAX_PAIRS=5000
+//   supabase secrets set GRAPH_INFERENCE_PER_ROW_K=8     # Sprint 42: HNSW LATERAL top-K width
 
 // @ts-ignore  Deno std import resolved at runtime.
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
@@ -108,35 +109,67 @@ async function fetchCandidatePairs(
   threshold: number,
   since: string | null,
   maxPairs: number,
+  perRowK: number,
 ): Promise<CandidatePair[]> {
-  const distanceCutoff = 1 - threshold;
+  // Sprint 42 T1 rewrite — HNSW-accelerated pairwise self-join.
+  //
+  // The pre-Sprint 42 query (`m1 JOIN m2 ON m1.id < m2.id AND (m1.embedding
+  // <=> m2.embedding) <= cutoff`) timed out at the 150s Edge Function
+  // wall-clock on >5K memory_items because cosine-distance constraints in
+  // a join's ON/WHERE clause cannot engage HNSW — they're post-join
+  // filters, evaluated for every candidate pair (~3.5M for 5K rows).
+  //
+  // The fix: switch to a CROSS JOIN LATERAL with `ORDER BY m2.embedding
+  // <=> m1.embedding LIMIT K` inside the lateral. HNSW serves the per-row
+  // top-K query in ~2ms each, so the work is O(N log K) ≈ N × HNSW-lookup
+  // rather than O(N²) cosine evaluations.
+  //
+  // Symmetry: each pair (A, B) may be found twice (once as A's neighbor
+  // of B, once as B's neighbor of A). LEAST/GREATEST canonicalizes the
+  // orientation; DISTINCT ON dedupes. This is more correct than filtering
+  // `m1.id < nbr.id` outside the lateral, which would lose pairs where
+  // only one direction's top-K contained the other.
+  //
+  // `since` filter: applied only to the outer m1. If m1 is old but m2
+  // was recently updated, the pair is still found on the iteration where
+  // m2 is the outer m1 (which IS recent). So filtering only m1 by `since`
+  // is sufficient and saves ~99% of work in steady state.
+  //
+  // EXPLAIN ANALYZE on petvetbid corpus (5,822 active rows, 2026-04-28):
+  // 13.5s cold start (since=NULL), HNSW correctly engaged, 718 raw
+  // matches → 359 unique pairs at threshold 0.85.
   const result = await sql.unsafe(
     `
-      SELECT
-        m1.id          AS source_id,
-        m2.id          AS target_id,
-        1 - (m1.embedding <=> m2.embedding) AS similarity,
-        m1.content     AS source_content,
-        m2.content     AS target_content,
-        m1.project     AS source_project,
-        m2.project     AS target_project
+      SELECT DISTINCT ON (LEAST(m1.id, nbr.id), GREATEST(m1.id, nbr.id))
+        LEAST(m1.id, nbr.id)    AS source_id,
+        GREATEST(m1.id, nbr.id) AS target_id,
+        1 - (m1.embedding <=> nbr.embedding) AS similarity,
+        CASE WHEN m1.id < nbr.id THEN m1.content ELSE nbr.content END AS source_content,
+        CASE WHEN m1.id < nbr.id THEN nbr.content ELSE m1.content END AS target_content,
+        CASE WHEN m1.id < nbr.id THEN m1.project ELSE nbr.project END AS source_project,
+        CASE WHEN m1.id < nbr.id THEN nbr.project ELSE m1.project END AS target_project
       FROM memory_items m1
-      JOIN memory_items m2
-        ON m1.id < m2.id
-       AND (m1.embedding <=> m2.embedding) <= $1
+      CROSS JOIN LATERAL (
+        SELECT id, embedding, content, project, updated_at
+        FROM memory_items m2
+        WHERE m2.is_active = true
+          AND m2.archived = false
+          AND m2.superseded_by IS NULL
+          AND m2.id <> m1.id
+        ORDER BY m2.embedding <=> m1.embedding
+        LIMIT $4
+      ) nbr
       WHERE m1.is_active = true
-        AND m2.is_active = true
         AND m1.archived = false
-        AND m2.archived = false
         AND m1.superseded_by IS NULL
-        AND m2.superseded_by IS NULL
-        AND ($2::timestamptz IS NULL
-             OR m1.updated_at > $2::timestamptz
-             OR m2.updated_at > $2::timestamptz)
-      ORDER BY m1.updated_at DESC, m2.updated_at DESC
+        AND 1 - (m1.embedding <=> nbr.embedding) >= $1
+        AND ($2::timestamptz IS NULL OR m1.updated_at > $2::timestamptz)
+      ORDER BY LEAST(m1.id, nbr.id),
+               GREATEST(m1.id, nbr.id),
+               1 - (m1.embedding <=> nbr.embedding) DESC
       LIMIT $3
     `,
-    [distanceCutoff, since, maxPairs],
+    [threshold, since, maxPairs, perRowK],
   );
   return result as unknown as CandidatePair[];
 }
@@ -240,6 +273,11 @@ export async function runGraphInference(sql: Sql): Promise<InferenceSummary> {
   const threshold = parseFloatEnv('GRAPH_INFERENCE_THRESHOLD', 0.85);
   const maxPairs = parseIntEnv('GRAPH_INFERENCE_MAX_PAIRS', 5000);
   const maxLlmCalls = parseIntEnv('GRAPH_INFERENCE_MAX_LLM_CALLS', 200);
+  // GRAPH_INFERENCE_PER_ROW_K — top-K HNSW lookup width for the LATERAL
+  // self-join (Sprint 42 T1 rewrite). 8 is a recall/perf sweet spot at
+  // threshold 0.85: it captures the high-similarity tail without paying
+  // for many post-filter rejections. Raise to 12 if recall drops.
+  const perRowK = parseIntEnv('GRAPH_INFERENCE_PER_ROW_K', 8);
   const llmEnabled = Deno.env.get('GRAPH_LLM_CLASSIFY') === '1';
   const apiKey = Deno.env.get('ANTHROPIC_API_KEY') ?? '';
   const inferredBy = inferredByTag(new Date());
@@ -255,7 +293,7 @@ export async function runGraphInference(sql: Sql): Promise<InferenceSummary> {
     throw err;
   }
 
-  const candidates = await fetchCandidatePairs(sql, threshold, summary.since, maxPairs);
+  const candidates = await fetchCandidatePairs(sql, threshold, summary.since, maxPairs, perRowK);
   summary.candidates_scanned = candidates.length;
 
   for (const pair of candidates) {
