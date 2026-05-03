@@ -343,9 +343,13 @@ export async function runGraphInference(sql: Sql): Promise<InferenceSummary> {
 }
 
 serve(async (_req: Request) => {
-  const url = Deno.env.get('DATABASE_URL');
+  // Supabase Edge Runtime auto-injects SUPABASE_DB_URL as a built-in env var.
+  // Falling back to it removes one whole category of "where do I get the DB
+  // connection string" from the install wizard. Brad surfaced this 2026-05-03
+  // after hand-patching all four of his deployed copies.
+  const url = Deno.env.get('DATABASE_URL') ?? Deno.env.get('SUPABASE_DB_URL');
   if (!url) {
-    console.error('[graph-inference] DATABASE_URL not set in Edge Function secrets');
+    console.error('[graph-inference] DATABASE_URL / SUPABASE_DB_URL not set in Edge Function secrets');
     return new Response(
       JSON.stringify({ ok: false, error: 'DATABASE_URL not set' }),
       { status: 500, headers: { 'Content-Type': 'application/json' } },
