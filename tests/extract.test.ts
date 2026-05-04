@@ -1,9 +1,10 @@
 /**
- * Rumen v0.3 — extract.ts test suite.
+ * Rumen v0.5 — extract.ts test suite.
  *
- * Every test wires a mock pg.Pool that records each query and returns canned
- * rows. We verify the ExtractResult shape + bind-arg contract without ever
- * touching Postgres.
+ * Sprint 53 picker rewrite tests. The picker now reads `memory_sessions`
+ * directly (one row per session, post-Sprint-51.6 bundled hook) and uses
+ * a single SELECT with `WHERE rumen_processed_at IS NULL` for idempotency.
+ * No second roundtrip to memory_items, no rumen_jobs cross-check.
  */
 
 import { test } from 'node:test';
@@ -17,50 +18,43 @@ const DEFAULT_OPTS = {
   minEventCount: 3,
 };
 
-/** SQL shape detection — the order is deterministic: candidates → jobs → N × content. */
+/** SQL shape detection — the rewritten picker is one SELECT against memory_sessions. */
 function isCandidateQuery(sql: string) {
-  return sql.includes('FROM memory_items') && sql.includes('GROUP BY m.source_session_id');
-}
-function isJobsQuery(sql: string) {
-  return sql.includes('FROM rumen_jobs');
-}
-function isContentQuery(sql: string) {
-  return sql.includes('FROM memory_items') && sql.includes('LIMIT 5');
+  return (
+    sql.includes('FROM memory_sessions') &&
+    sql.includes('rumen_processed_at IS NULL')
+  );
 }
 
-test('extractSignals: builds 3 signals from 3 candidate rows (happy path)', async () => {
+test('extractSignals: builds 3 signals from 3 memory_sessions rows (happy path)', async () => {
   const { pool, calls } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
         return {
           rows: [
             {
-              id: 's1',
+              id: '11111111-1111-1111-1111-111111111111',
               project: 'alpha',
-              summary: null,
+              summary: 'session 1 summary text',
               created_at: '2026-04-14T00:00:00Z',
               event_count: 5,
             },
             {
-              id: 's2',
+              id: '22222222-2222-2222-2222-222222222222',
               project: 'beta',
-              summary: null,
+              summary: 'session 2 summary text',
               created_at: '2026-04-14T01:00:00Z',
               event_count: 4,
             },
             {
-              id: 's3',
+              id: '33333333-3333-3333-3333-333333333333',
               project: 'gamma',
-              summary: null,
+              summary: 'session 3 summary text',
               created_at: '2026-04-14T02:00:00Z',
               event_count: 6,
             },
           ],
         };
-      }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) {
-        return { rows: [{ content: 'hello world from ' + String(call.params[0]) }] };
       }
       return { rows: [] };
     },
@@ -70,139 +64,142 @@ test('extractSignals: builds 3 signals from 3 candidate rows (happy path)', asyn
   assert.equal(result.signals.length, 3);
   assert.deepEqual(
     result.signals.map((s) => s.key),
-    ['session:s1', 'session:s2', 'session:s3'],
+    [
+      'session:11111111-1111-1111-1111-111111111111',
+      'session:22222222-2222-2222-2222-222222222222',
+      'session:33333333-3333-3333-3333-333333333333',
+    ],
   );
-  // 1 candidate + 1 jobs + 3 content = 5 calls.
-  assert.equal(calls.length, 5);
+  // Single SELECT, no second roundtrip — picker is one query.
+  assert.equal(calls.length, 1);
 });
 
-test('extractSignals: candidate query is called with [lookbackHours, fetchLimit, minEventCount] bind args', async () => {
+test('extractSignals: candidate query is called with [lookbackHours, maxSessions, minEventCount] bind args', async () => {
   const { pool, calls } = makeMockPool({
-    responses: (call: QueryCall) => {
-      if (isCandidateQuery(call.sql)) return { rows: [] };
-      return { rows: [] };
-    },
+    responses: () => ({ rows: [] }),
   });
   await quiet(() => extractSignals(pool, DEFAULT_OPTS));
   const candidateCall = calls.find((c) => isCandidateQuery(c.sql));
   assert.ok(candidateCall, 'expected a candidate query');
   assert.deepEqual(candidateCall!.params, [
     '72', // lookbackHours as string
-    40, // maxSessions * 4 fetchLimit
-    3, // minEventCount
+    10,   // maxSessions (no x4 headroom — SQL pre-filters)
+    3,    // minEventCount
   ]);
 });
 
-test('extractSignals: rows with event_count < minEventCount are dropped into skippedTrivial', async () => {
+test('extractSignals: candidate SQL filters rumen_processed_at IS NULL and ended_at IS NOT NULL', async () => {
+  const { pool, calls } = makeMockPool({
+    responses: () => ({ rows: [] }),
+  });
+  await quiet(() => extractSignals(pool, DEFAULT_OPTS));
+  const candidateCall = calls.find((c) => c.sql.includes('FROM memory_sessions'));
+  assert.ok(candidateCall, 'expected a candidate query');
+  assert.match(candidateCall!.sql, /rumen_processed_at IS NULL/);
+  assert.match(candidateCall!.sql, /ended_at IS NOT NULL/);
+});
+
+test('extractSignals: candidate SQL filters by messages_count >= minEventCount', async () => {
+  const { pool, calls } = makeMockPool({
+    responses: () => ({ rows: [] }),
+  });
+  await quiet(() => extractSignals(pool, DEFAULT_OPTS));
+  const candidateCall = calls.find((c) => c.sql.includes('FROM memory_sessions'));
+  assert.ok(candidateCall, 'expected a candidate query');
+  assert.match(candidateCall!.sql, /messages_count[^<>]*>=/);
+});
+
+test('extractSignals: candidate SQL filters out empty/null summaries', async () => {
+  // T4-CODEX 17:25 ET pre-FIX catch — empty summaries can't generate signals,
+  // so they must be filtered at SQL or stamped, otherwise they re-pick forever.
+  const { pool, calls } = makeMockPool({
+    responses: () => ({ rows: [] }),
+  });
+  await quiet(() => extractSignals(pool, DEFAULT_OPTS));
+  const candidateCall = calls.find((c) => c.sql.includes('FROM memory_sessions'));
+  assert.ok(candidateCall, 'expected a candidate query');
+  assert.match(candidateCall!.sql, /summary IS NOT NULL/);
+  assert.match(candidateCall!.sql, /summary <> ''/);
+});
+
+test('extractSignals: pickedSessionIds includes ALL fetched candidates (signal-emitting AND dropped)', async () => {
+  // T4-CODEX 17:25 ET — orchestrator stamps pickedSessionIds (not signal IDs)
+  // so a buildSignal dropout still gets rumen_processed_at stamped and
+  // doesn't infinite-loop.
   const { pool } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
         return {
           rows: [
             {
-              id: 'trivial-1',
+              id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
               project: 'alpha',
-              summary: null,
+              summary: 'has summary',
               created_at: '2026-04-14T00:00:00Z',
-              event_count: 1,
+              event_count: 5,
             },
             {
-              id: 'keep-1',
+              id: 'dddddddd-dddd-dddd-dddd-dddddddddddd',
               project: 'alpha',
-              summary: null,
+              summary: '', // empty — buildSignal will drop
               created_at: '2026-04-14T00:00:00Z',
               event_count: 5,
             },
           ],
         };
       }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) return { rows: [{ content: 'ok' }] };
       return { rows: [] };
     },
   });
 
   const result = await quiet(() => extractSignals(pool, DEFAULT_OPTS));
-  assert.deepEqual(result.skippedTrivial, ['trivial-1']);
   assert.equal(result.signals.length, 1);
-  assert.equal(result.signals[0]!.session_id, 'keep-1');
+  assert.deepEqual(result.pickedSessionIds, [
+    'cccccccc-cccc-cccc-cccc-cccccccccccc',
+    'dddddddd-dddd-dddd-dddd-dddddddddddd',
+  ]);
 });
 
-test('extractSignals: sessions appearing in a prior done rumen_jobs row go into skippedAlreadyProcessed', async () => {
+test('extractSignals: rows with empty summary are silently dropped by buildSignal', async () => {
   const { pool } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
         return {
           rows: [
             {
-              id: 'old-sess',
+              id: '44444444-4444-4444-4444-444444444444',
               project: 'alpha',
-              summary: null,
+              summary: '',
               created_at: '2026-04-14T00:00:00Z',
               event_count: 5,
             },
             {
-              id: 'new-sess',
+              id: '55555555-5555-5555-5555-555555555555',
               project: 'alpha',
-              summary: null,
-              created_at: '2026-04-14T00:00:00Z',
+              summary: 'has content',
+              created_at: '2026-04-14T01:00:00Z',
               event_count: 5,
             },
           ],
         };
       }
-      if (isJobsQuery(call.sql)) {
-        return { rows: [{ session_id: 'old-sess' }] };
-      }
-      if (isContentQuery(call.sql)) return { rows: [{ content: 'ok' }] };
       return { rows: [] };
     },
   });
 
   const result = await quiet(() => extractSignals(pool, DEFAULT_OPTS));
-  assert.deepEqual(result.skippedAlreadyProcessed, ['old-sess']);
   assert.equal(result.signals.length, 1);
-  assert.equal(result.signals[0]!.session_id, 'new-sess');
+  assert.equal(result.signals[0]!.session_id, '55555555-5555-5555-5555-555555555555');
 });
 
-test('extractSignals: fresh candidates exceeding maxSessions are truncated', async () => {
-  const { pool } = makeMockPool({
-    responses: (call: QueryCall) => {
-      if (isCandidateQuery(call.sql)) {
-        return {
-          rows: Array.from({ length: 5 }, (_, i) => ({
-            id: 'sess-' + i,
-            project: 'alpha',
-            summary: null,
-            created_at: '2026-04-14T00:00:00Z',
-            event_count: 5,
-          })),
-        };
-      }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) return { rows: [{ content: 'ok' }] };
-      return { rows: [] };
-    },
-  });
-
-  const result = await quiet(() =>
-    extractSignals(pool, { ...DEFAULT_OPTS, maxSessions: 2 }),
-  );
-  assert.equal(result.signals.length, 2);
-  assert.deepEqual(
-    result.signals.map((s) => s.session_id),
-    ['sess-0', 'sess-1'],
-  );
-});
-
-test('extractSignals: sessions with empty memory_items are silently dropped by buildSignal', async () => {
+test('extractSignals: rows with null summary are silently dropped by buildSignal', async () => {
   const { pool } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
         return {
           rows: [
             {
-              id: 'empty-sess',
+              id: '66666666-6666-6666-6666-666666666666',
               project: 'alpha',
               summary: null,
               created_at: '2026-04-14T00:00:00Z',
@@ -211,20 +208,20 @@ test('extractSignals: sessions with empty memory_items are silently dropped by b
           ],
         };
       }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) return { rows: [] }; // no content
       return { rows: [] };
     },
   });
 
   const result = await quiet(() => extractSignals(pool, DEFAULT_OPTS));
   assert.equal(result.signals.length, 0);
-  assert.deepEqual(result.skippedTrivial, []);
-  assert.deepEqual(result.skippedAlreadyProcessed, []);
 });
 
-test('extractSignals: signal.key is always "session:<source_session_id>" for all inputs', async () => {
-  const ids = ['abc-123', 'foo-bar', '9a8b7c6d'];
+test('extractSignals: signal.key is always "session:<memory_sessions.id>" for all rows', async () => {
+  const ids = [
+    '77777777-7777-7777-7777-777777777777',
+    '88888888-8888-8888-8888-888888888888',
+    '99999999-9999-9999-9999-999999999999',
+  ];
   const { pool } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
@@ -232,14 +229,12 @@ test('extractSignals: signal.key is always "session:<source_session_id>" for all
           rows: ids.map((id) => ({
             id,
             project: 'alpha',
-            summary: null,
+            summary: 'a summary',
             created_at: '2026-04-14T00:00:00Z',
             event_count: 5,
           })),
         };
       }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) return { rows: [{ content: 'ok' }] };
       return { rows: [] };
     },
   });
@@ -252,35 +247,22 @@ test('extractSignals: signal.key is always "session:<source_session_id>" for all
   );
 });
 
-test('extractSignals: a buildSignal failure does not kill sibling signals', async () => {
-  let contentCall = 0;
-  const { pool } = makeMockPool({
+test('extractSignals: signal.search_text is the session summary directly (no second roundtrip)', async () => {
+  const summary = 'this is the bundled-hook summary that becomes the search text';
+  const { pool, calls } = makeMockPool({
     responses: (call: QueryCall) => {
       if (isCandidateQuery(call.sql)) {
         return {
           rows: [
             {
-              id: 'bad',
+              id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
               project: 'alpha',
-              summary: null,
-              created_at: '2026-04-14T00:00:00Z',
-              event_count: 5,
-            },
-            {
-              id: 'good',
-              project: 'alpha',
-              summary: null,
+              summary,
               created_at: '2026-04-14T00:00:00Z',
               event_count: 5,
             },
           ],
         };
-      }
-      if (isJobsQuery(call.sql)) return { rows: [] };
-      if (isContentQuery(call.sql)) {
-        contentCall += 1;
-        if (contentCall === 1) return new Error('boom');
-        return { rows: [{ content: 'still ok' }] };
       }
       return { rows: [] };
     },
@@ -288,5 +270,48 @@ test('extractSignals: a buildSignal failure does not kill sibling signals', asyn
 
   const result = await quiet(() => extractSignals(pool, DEFAULT_OPTS));
   assert.equal(result.signals.length, 1);
-  assert.equal(result.signals[0]!.session_id, 'good');
+  assert.equal(result.signals[0]!.search_text, summary);
+  // No second query — buildSignal is pure, doesn't touch the pool.
+  assert.equal(calls.length, 1);
+});
+
+test('extractSignals: signal.search_text is truncated to 2000 chars on long summaries', async () => {
+  const longSummary = 'x'.repeat(5000);
+  const { pool } = makeMockPool({
+    responses: (call: QueryCall) => {
+      if (isCandidateQuery(call.sql)) {
+        return {
+          rows: [
+            {
+              id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+              project: 'alpha',
+              summary: longSummary,
+              created_at: '2026-04-14T00:00:00Z',
+              event_count: 5,
+            },
+          ],
+        };
+      }
+      return { rows: [] };
+    },
+  });
+
+  const result = await quiet(() => extractSignals(pool, DEFAULT_OPTS));
+  assert.equal(result.signals[0]!.search_text.length, 2000);
+});
+
+test('extractSignals: pool failure during candidate query bubbles up', async () => {
+  const { pool } = makeMockPool({
+    responses: (call: QueryCall) => {
+      if (isCandidateQuery(call.sql)) {
+        return new Error('pg connection refused');
+      }
+      return { rows: [] };
+    },
+  });
+
+  await assert.rejects(
+    () => quiet(() => extractSignals(pool, DEFAULT_OPTS)),
+    /pg connection refused/,
+  );
 });

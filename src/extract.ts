@@ -1,16 +1,40 @@
 /**
- * Rumen v0.3 — Extract phase.
+ * Rumen v0.5 — Extract phase.
  *
- * Pulls recent sessions out of Mnestra's memory_items table by grouping on
- * source_session_id. Prior versions joined to memory_sessions on its UUID
- * primary key, but in rag-system's actual schema memory_items.source_session_id
- * references a separate ID space (the Claude Code session identifier) and
- * never matches memory_sessions.id. Grouping memory_items directly is both
- * correct and simpler — the session grouping is the source_session_id value
- * itself, and memory_sessions is ignored by Rumen.
+ * Sprint 53 (TermDeck v1.0.9) picker rewrite. Reads candidate sessions
+ * directly from `memory_sessions` (one row per Claude Code session,
+ * post-Sprint-51.6 bundled hook) instead of grouping `memory_items` by
+ * source_session_id. The grouping pattern was correct for v0.3-era
+ * payloads where each Claude turn produced one memory_items row, but
+ * the Sprint 51.6 bundled hook collapsed each session to one
+ * source_type='session_summary' row — breaking the GROUP BY threshold
+ * filter and stranding insights flow at 0/tick for ~3 days on Joshua's
+ * daily-driver project.
  *
- * v0.3 still emits one signal per session. v0.4 will add multiple signals per
- * session via LLM extraction.
+ * Pivot:
+ *   - SELECT FROM memory_sessions WHERE rumen_processed_at IS NULL …
+ *   - Each row is its own candidate; no grouping.
+ *   - buildSignal reads session.summary directly — no second roundtrip
+ *     to fetch memory_items content.
+ *   - Atomic stamp of memory_sessions.rumen_processed_at = now() lives
+ *     in the orchestrator (index.ts), not here, so we don't double-emit
+ *     on retry while still letting synthesize/surface roll back cleanly
+ *     on failure.
+ *
+ * Schema target (Mnestra mig 017 + 018):
+ *   - memory_sessions.id              uuid PK (the Rumen row key)
+ *   - memory_sessions.session_id      text — Claude Code session UUID,
+ *                                     written by the bundled hook;
+ *                                     hook-internal, NOT used by Rumen
+ *                                     (avoids the "1 non-UUID session_id
+ *                                     out of 308" cast pitfall T4-CODEX
+ *                                     surfaced in Sprint 53).
+ *   - memory_sessions.project         text
+ *   - memory_sessions.summary         text — bundled-hook session summary
+ *   - memory_sessions.started_at      timestamptz
+ *   - memory_sessions.ended_at        timestamptz (filter: NOT NULL)
+ *   - memory_sessions.messages_count  int (replaces v0.3 event_count)
+ *   - memory_sessions.rumen_processed_at  timestamptz (mig 018)
  */
 
 import type { PgPool } from './db.js';
@@ -24,14 +48,25 @@ export interface ExtractOptions {
 
 export interface ExtractResult {
   signals: RumenSignal[];
-  /** Session IDs that were skipped because they already appear in a rumen_jobs row. */
-  skippedAlreadyProcessed: string[];
-  /** Session IDs that were skipped because they had fewer than minEventCount events. */
-  skippedTrivial: string[];
+  /**
+   * Every memory_sessions.id the SQL picker returned, regardless of whether
+   * buildSignal accepted it. The orchestrator stamps these (not just
+   * signal.session_id) so a row dropped by buildSignal (e.g. unexpected
+   * empty/malformed summary that slipped past the SQL summary filter)
+   * still gets `rumen_processed_at` stamped and won't infinite-loop on
+   * subsequent ticks. T4-CODEX 17:25 ET pre-FIX audit catch.
+   */
+  pickedSessionIds: string[];
 }
 
 /**
- * Pull candidate sessions from Mnestra, filter them, and build signals.
+ * Pull candidate sessions from Mnestra and build signals.
+ *
+ * The picker query is partial-index-backed (mig 018):
+ * `memory_sessions_rumen_unprocessed_idx ON (started_at DESC) WHERE rumen_processed_at IS NULL`.
+ * SQL pre-filters on rumen_processed_at IS NULL, ended_at IS NOT NULL,
+ * lookback window, and messages_count threshold — there is no
+ * post-fetch trivial/already-processed bucket to track.
  */
 export async function extractSignals(
   pool: PgPool,
@@ -48,31 +83,32 @@ export async function extractSignals(
       minEventCount,
   );
 
-  // 1. Group memory_items by source_session_id, filter to sessions whose
-  //    earliest item falls inside the lookback window, and keep those with
-  //    enough events to be worth processing. We fetch a little more than
-  //    maxSessions so we have headroom after the "already processed" filter.
   let candidates: MemorySession[];
   try {
-    const fetchLimit = maxSessions * 4;
+    // SQL filters: rumen_processed_at IS NULL (pick only unseen rows),
+    // ended_at IS NOT NULL (in-flight sessions excluded), lookback window,
+    // messages_count threshold, and summary non-empty. The summary filter
+    // is the cheap belt — the orchestrator's stamp-all-picked is the
+    // suspenders against any remaining buildSignal dropouts.
     const res = await pool.query<MemorySession>(
       `
         SELECT
-          m.source_session_id                AS id,
-          (ARRAY_AGG(m.project))[1]          AS project,
-          NULL::text                         AS summary,
-          MIN(m.created_at)                  AS created_at,
-          COUNT(*)::int                      AS event_count
-        FROM memory_items m
-        WHERE m.source_session_id IS NOT NULL
-          AND m.is_active = TRUE
-        GROUP BY m.source_session_id
-        HAVING COUNT(*) >= $3
-           AND MIN(m.created_at) >= NOW() - ($1 || ' hours')::interval
-        ORDER BY MIN(m.created_at) DESC
+          s.id           AS id,
+          s.project      AS project,
+          s.summary      AS summary,
+          s.started_at   AS created_at,
+          COALESCE(s.messages_count, 0)::int AS event_count
+        FROM memory_sessions s
+        WHERE s.rumen_processed_at IS NULL
+          AND s.ended_at IS NOT NULL
+          AND s.started_at >= NOW() - ($1 || ' hours')::interval
+          AND COALESCE(s.messages_count, 0) >= $3
+          AND s.summary IS NOT NULL
+          AND s.summary <> ''
+        ORDER BY s.started_at DESC
         LIMIT $2
       `,
-      [String(lookbackHours), fetchLimit, minEventCount],
+      [String(lookbackHours), maxSessions, minEventCount],
     );
     candidates = res.rows;
   } catch (err) {
@@ -82,83 +118,16 @@ export async function extractSignals(
 
   console.log('[rumen-extract] found ' + candidates.length + ' candidate sessions');
 
-  // 2. Drop trivial sessions.
-  const skippedTrivial: string[] = [];
-  const nonTrivial: MemorySession[] = [];
-  for (const s of candidates) {
-    if (s.event_count < minEventCount) {
-      skippedTrivial.push(s.id);
-      continue;
-    }
-    nonTrivial.push(s);
-  }
-  if (skippedTrivial.length > 0) {
-    console.log(
-      '[rumen-extract] skipped ' +
-        skippedTrivial.length +
-        ' trivial sessions (<' +
-        minEventCount +
-        ' events)',
-    );
-  }
+  // Picked IDs flow to the orchestrator BEFORE buildSignal filters — that
+  // way every candidate (including any dropped here) gets stamped. Avoids
+  // the infinite-loop class T4-CODEX called out: a row dropped by buildSignal
+  // but never stamped re-picks every tick forever.
+  const pickedSessionIds = candidates.map((c) => c.id);
 
-  // 3. Drop sessions that already appear in a completed rumen_jobs row.
-  //    We check source_session_ids via GIN-backed array containment.
-  const skippedAlreadyProcessed: string[] = [];
-  const fresh: MemorySession[] = [];
-  if (nonTrivial.length > 0) {
-    let alreadyProcessedIds: Set<string>;
-    try {
-      const res = await pool.query<{ session_id: string }>(
-        `
-          SELECT DISTINCT unnest(source_session_ids) AS session_id
-          FROM rumen_jobs
-          WHERE status = 'done'
-            AND source_session_ids && $1::uuid[]
-        `,
-        [nonTrivial.map((s) => s.id)],
-      );
-      alreadyProcessedIds = new Set(res.rows.map((r) => r.session_id));
-    } catch (err) {
-      console.error('[rumen-extract] failed to check prior rumen_jobs:', err);
-      throw err;
-    }
-
-    for (const s of nonTrivial) {
-      if (alreadyProcessedIds.has(s.id)) {
-        skippedAlreadyProcessed.push(s.id);
-        continue;
-      }
-      fresh.push(s);
-    }
-  }
-  if (skippedAlreadyProcessed.length > 0) {
-    console.log(
-      '[rumen-extract] skipped ' +
-        skippedAlreadyProcessed.length +
-        ' sessions already processed by a prior job',
-    );
-  }
-
-  // 4. Cap at maxSessions.
-  const chosen = fresh.slice(0, maxSessions);
-  if (chosen.length < fresh.length) {
-    console.log(
-      '[rumen-extract] capped at ' +
-        maxSessions +
-        ' sessions (had ' +
-        fresh.length +
-        ' fresh candidates)',
-    );
-  }
-
-  // 5. Build one signal per chosen session. v0.1 uses session summary as the
-  //    search text; if the summary is empty, fall back to a content rollup
-  //    from the session's memory_items.
   const signals: RumenSignal[] = [];
-  for (const session of chosen) {
+  for (const session of candidates) {
     try {
-      const signal = await buildSignal(pool, session);
+      const signal = buildSignal(session);
       if (signal) {
         signals.push(signal);
       }
@@ -170,43 +139,17 @@ export async function extractSignals(
 
   console.log('[rumen-extract] produced ' + signals.length + ' signals');
 
-  return {
-    signals,
-    skippedAlreadyProcessed,
-    skippedTrivial,
-  };
+  return { signals, pickedSessionIds };
 }
 
-async function buildSignal(
-  pool: PgPool,
-  session: MemorySession,
-): Promise<RumenSignal | null> {
-  // In v0.3 there is no per-session summary column — Rumen treats
-  // memory_items.source_session_id as the session key directly, so we always
-  // build the search text from a content rollup of the session's items.
-  const res = await pool.query<{ content: string }>(
-    `
-      SELECT content
-      FROM memory_items
-      WHERE source_session_id = $1
-        AND is_active = TRUE
-      ORDER BY created_at ASC
-      LIMIT 5
-    `,
-    [session.id],
-  );
-  const searchText = res.rows
-    .map((r) => r.content)
-    .join('\n')
-    .slice(0, 2000)
-    .trim();
-
-  if (searchText.length === 0) {
-    // Nothing to relate against. Skip.
-    console.log('[rumen-extract] session ' + session.id + ' has no content to search on');
+function buildSignal(session: MemorySession): RumenSignal | null {
+  const summary = (session.summary ?? '').trim();
+  if (summary.length === 0) {
+    console.log('[rumen-extract] session ' + session.id + ' has no summary to search on');
     return null;
   }
 
+  const searchText = summary.slice(0, 2000);
   const description =
     searchText.slice(0, 240) ||
     'Session ' + session.id + ' in ' + (session.project ?? 'unknown project');

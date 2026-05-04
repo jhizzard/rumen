@@ -118,6 +118,22 @@ export async function runRumenJob(
         .map((rs) => makePlaceholderInsight(rs));
     }
 
+    // 4b. Stamp `memory_sessions.rumen_processed_at = now()` BEFORE surface.
+    //     Picker filters `WHERE rumen_processed_at IS NULL`, so this is the
+    //     idempotency guard against double-emit on retry. Order is critical
+    //     (T4-CODEX 17:25 ET pre-FIX audit):
+    //       - stamp before surface → if stamp fails, throw aborts the job
+    //         BEFORE any insights are written; next tick re-picks cleanly
+    //         (zero double-emit risk because surface never ran).
+    //       - stamp on extractResult.pickedSessionIds (not just signal IDs)
+    //         so any buildSignal dropout still gets stamped — closes the
+    //         "empty-summary candidates re-pick forever" infinite-loop class.
+    //     Surface has no de-dupe constraint on rumen_insights, so any
+    //     scheme that allows surface to run before stamp is unsafe.
+    if (extractResult.pickedSessionIds.length > 0) {
+      await stampSessionsProcessed(pool, extractResult.pickedSessionIds);
+    }
+
     // 5. Surface.
     const surfaceResult = await surfaceInsights(pool, insights, { jobId });
 
@@ -172,10 +188,17 @@ async function createJob(
   pool: PgPool,
   triggeredBy: 'schedule' | 'session_end' | 'manual',
 ): Promise<CreatedJobRow> {
+  // Explicitly supply started_at = NOW() (rather than relying on the column
+  // default) — defense-in-depth against pre-mig-001-DEFAULT-NOW installs
+  // where rumen_jobs.started_at lost its NOT NULL DEFAULT during a prior
+  // bootstrap. Without this, started_at falls through to NULL on those
+  // installs and breaks downstream "recent ticks" queries that ORDER BY
+  // started_at DESC. T3 cross-lane callout 2026-05-04 17:33 ET; daily-driver
+  // had 5 successive ticks with started_at=NULL because of this drift.
   const res = await pool.query<CreatedJobRow>(
     `
-      INSERT INTO rumen_jobs (triggered_by, status)
-      VALUES ($1, 'running')
+      INSERT INTO rumen_jobs (triggered_by, status, started_at)
+      VALUES ($1, 'running', NOW())
       RETURNING id, started_at
     `,
     [triggeredBy],
@@ -207,6 +230,31 @@ interface CompletedJobRow {
   started_at: string;
   completed_at: string;
   error_message: string | null;
+}
+
+/**
+ * Stamp `memory_sessions.rumen_processed_at = now()` for every session
+ * the picker fetched in this tick. Picker filter `rumen_processed_at
+ * IS NULL` makes this the idempotency guard.
+ *
+ * Failures here THROW (no swallow). Stamp runs BEFORE surface in
+ * runRumenJob; throwing aborts the job before any rumen_insights row
+ * is written, so the next tick re-picks cleanly with zero double-emit
+ * risk. surface.ts has no row-level de-dupe, so swallowing a stamp
+ * failure (or stamping after surface) would risk duplicate insights.
+ */
+async function stampSessionsProcessed(
+  pool: PgPool,
+  sessionIds: string[],
+): Promise<void> {
+  await pool.query(
+    `
+      UPDATE memory_sessions
+      SET rumen_processed_at = NOW()
+      WHERE id = ANY($1::uuid[])
+    `,
+    [sessionIds],
+  );
 }
 
 async function completeJob(

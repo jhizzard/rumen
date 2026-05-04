@@ -51,18 +51,27 @@ export interface MemoryItem {
 }
 
 /**
- * A session as seen by Rumen — since v0.3, this is a synthetic grouping over
- * memory_items by source_session_id, not a row from memory_sessions. The `id`
- * field is the source_session_id value (text, typically a UUID string);
- * `summary` is always null in v0.3 and reserved for a future LLM-generated
- * summary.
+ * A session as seen by Rumen.
+ *
+ * v0.5 (Sprint 53 picker rewrite): a real `memory_sessions` row, one per
+ * Claude Code session, written by the Sprint 51.6+ bundled session-end
+ * hook. `id` is the row's uuid PK (`memory_sessions.id`, gen_random_uuid()
+ * on insert) — NOT the hook's text `session_id` column. The PK choice is
+ * deliberate: it's bulletproof against the rare non-UUID `session_id`
+ * values the hook may emit (T4-CODEX audit found 1/308 on the daily-driver
+ * project) and casts cleanly into `rumen_jobs.source_session_ids uuid[]`.
+ *
+ * `summary` is the bundled-hook session summary (search text + description
+ * source). `created_at` is `started_at` — when the session began, not when
+ * the row was inserted. `event_count` is `messages_count` from the hook
+ * payload.
  */
 export interface MemorySession {
   id: string;
   project: string | null;
   summary: string | null;
   created_at: string;
-  /** Number of memory_items rows in this source_session_id grouping. */
+  /** memory_sessions.messages_count populated by the bundled hook. */
   event_count: number;
 }
 
