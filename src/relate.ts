@@ -168,7 +168,8 @@ async function relateOne(
   minSimilarity: number,
   embedding: number[] | null,
 ): Promise<RelatedMemory[]> {
-  // Mnestra's memory_hybrid_search signature (as of rag-system 2026-03-04):
+  // Mnestra's CANONICAL memory_hybrid_search signature (post-Sprint-51.9 /
+  // mig 002's do$$ drop-prelude):
   //   query_text          text
   //   query_embedding     vector
   //   match_count         integer
@@ -177,8 +178,22 @@ async function relateOne(
   //   rrf_k               integer
   //   filter_project      text
   //   filter_source_type  text
-  //   recency_weight      double precision
-  //   decay_days          double precision
+  //
+  // Sprint 54 (rumen 0.5.1) — this lane was the OTHER side of the
+  // Sprint 51.9 fix. Sprint 51.9 dropped a 10-arg drift overload
+  // (extra `recency_weight` + `decay_days` from the rag-system writer's
+  // pre-canonical bootstrap) from the DB via mig 002's do$$ guard. But
+  // rumen's relate.ts was still calling the 10-arg shape — every call
+  // errored, every signal ended up with `related = []`, every tick
+  // emitted 0 insights even though the picker rewrite (Sprint 53)
+  // correctly found candidates. Symptom on the daily-driver project
+  // post-Sprint-53 manual rumen-tick:
+  //   sessions_processed: 7  ← Sprint 53 picker working
+  //   insights_generated: 0  ← THIS bug
+  // Fix: drop the trailing recency_weight + decay_days args. Rumen
+  // doesn't need recency weighting — its purpose is cross-project
+  // prior art, not "what's recent." Pure similarity is the right
+  // ranking for that.
   const vectorParam = embedding ? formatVectorLiteral(embedding) : null;
   const fullTextWeight = embedding
     ? HYBRID_FULL_TEXT_WEIGHT
@@ -211,9 +226,7 @@ async function relateOne(
         $5::double precision,
         60,
         NULL::text,
-        NULL::text,
-        0.15::double precision,
-        30.0::double precision
+        NULL::text
       )
     `,
     [signal.search_text, vectorParam, TOP_K, fullTextWeight, semanticWeight],
