@@ -86,26 +86,40 @@ export async function extractSignals(
   let candidates: MemorySession[];
   try {
     // SQL filters: rumen_processed_at IS NULL (pick only unseen rows),
-    // ended_at IS NOT NULL (in-flight sessions excluded), lookback window,
+    // ended_at IS NOT NULL (in-flight sessions excluded), lookback window
+    // anchored on `ended_at` (NOT started_at — see Sprint 55 Bug A below),
     // messages_count threshold, and summary non-empty. The summary filter
     // is the cheap belt — the orchestrator's stamp-all-picked is the
     // suspenders against any remaining buildSignal dropouts.
+    //
+    // Sprint 55 Bug A fix (2026-05-05) — anchor the lookback on ended_at:
+    // older write paths populate ended_at but leave started_at NULL on
+    // some memory_sessions rows. The previous filter
+    //   AND s.started_at >= NOW() - ($1 || ' hours')::interval
+    // evaluates to NULL (= row excluded) for any row with started_at IS
+    // NULL, even when ended_at is recent. Result on the daily-driver
+    // project at Sprint 55 open: 6 NULL-started_at rows in the 72-hour
+    // window were silently dropped, contributing to the rumen_insights
+    // 4-day flatline. Anchoring on ended_at (which IS NOT NULL is already
+    // required by the filter on the next line up) restores those rows.
+    // SELECT.created_at and ORDER BY also fall through to ended_at via
+    // COALESCE so downstream consumers see a real timestamp on every row.
     const res = await pool.query<MemorySession>(
       `
         SELECT
           s.id           AS id,
           s.project      AS project,
           s.summary      AS summary,
-          s.started_at   AS created_at,
+          COALESCE(s.started_at, s.ended_at) AS created_at,
           COALESCE(s.messages_count, 0)::int AS event_count
         FROM memory_sessions s
         WHERE s.rumen_processed_at IS NULL
           AND s.ended_at IS NOT NULL
-          AND s.started_at >= NOW() - ($1 || ' hours')::interval
+          AND s.ended_at >= NOW() - ($1 || ' hours')::interval
           AND COALESCE(s.messages_count, 0) >= $3
           AND s.summary IS NOT NULL
           AND s.summary <> ''
-        ORDER BY s.started_at DESC
+        ORDER BY COALESCE(s.started_at, s.ended_at) DESC NULLS LAST
         LIMIT $2
       `,
       [String(lookbackHours), maxSessions, minEventCount],
