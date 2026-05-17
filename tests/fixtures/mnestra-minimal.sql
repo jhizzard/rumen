@@ -1,11 +1,19 @@
 -- Minimal Mnestra-compatible fixture for Rumen CI integration tests.
 --
--- Creates the subset of the Mnestra schema Rumen v0.1 reads — memory_sessions,
+-- Creates the subset of the Mnestra schema Rumen reads — memory_sessions,
 -- memory_items, and the memory_hybrid_search() SQL function — and seeds two
 -- sessions across two projects so extract → relate → synthesize → surface
 -- produces at least one insight. Does not install pgvector: the vector column
 -- is created as NUMERIC[] and memory_hybrid_search falls back to keyword-only
--- matching (query_embedding is passed as NULL by Rumen in v0.1 anyway).
+-- matching (query_embedding is passed as NULL by Rumen anyway).
+--
+-- memory_sessions mirrors the v0.5 Mnestra schema (engram migrations 001 + 017
+-- + 018). The Sprint 53 picker rewrite (src/extract.ts) reads sessions
+-- directly from memory_sessions, filtering on started_at / ended_at /
+-- messages_count / rumen_processed_at. The pre-v0.5 fixture only had
+-- id/project/summary/created_at, so the picker failed CI with
+-- "column s.started_at does not exist" — keep this table in lockstep with
+-- src/extract.ts whenever the picker query changes.
 
 BEGIN;
 
@@ -24,14 +32,29 @@ END
 $$;
 
 -- ---------------------------------------------------------------------------
--- memory_sessions
+-- memory_sessions — v0.5 schema (Mnestra migrations 001 + 017 + 018).
+-- The extract picker (src/extract.ts) reads started_at, ended_at,
+-- messages_count and rumen_processed_at directly off this table; the stamp
+-- step (src/index.ts) updates rumen_processed_at. summary_embedding and the
+-- HNSW index from mig 017 are omitted — Rumen never reads the embedding and
+-- this fixture has no pgvector.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS memory_sessions (
-  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  project    TEXT,
-  summary    TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  session_id         TEXT,
+  project            TEXT,
+  summary            TEXT,
+  started_at         TIMESTAMPTZ,
+  ended_at           TIMESTAMPTZ,
+  messages_count     INTEGER DEFAULT 0,
+  rumen_processed_at TIMESTAMPTZ,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Picker hot-path index (engram mig 018): unprocessed sessions by recency.
+CREATE INDEX IF NOT EXISTS memory_sessions_rumen_unprocessed_idx
+  ON memory_sessions (started_at DESC NULLS LAST)
+  WHERE rumen_processed_at IS NULL;
 
 -- ---------------------------------------------------------------------------
 -- memory_items
@@ -55,20 +78,42 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_project
   ON memory_items (project);
 
 -- ---------------------------------------------------------------------------
--- memory_hybrid_search — keyword-only fallback (query_embedding ignored).
+-- memory_hybrid_search — keyword-only fixture stand-in.
 --
--- Rumen v0.1 calls this with query_embedding = NULL, so we only need a
--- reasonable ILIKE-based ranking. Similarity is synthesized from position and
--- overlap so the fixture can clear Rumen's default 0.7 threshold.
--- The `vector` type does not exist here; we accept an untyped argument.
+-- Canonical 8-arg Mnestra signature (Sprint 51.9 / rumen Sprint 54). The v0.5
+-- relate phase (src/relate.ts → relateOne) calls memory_hybrid_search with
+--   (query_text, query_embedding, match_count, full_text_weight,
+--    semantic_weight, rrf_k, filter_project, filter_source_type)
+-- and reads back a `score` column. The pre-Sprint-54 fixture defined the old
+-- 4-arg (text, vector, int, text) → `similarity` shape, so relate failed CI
+-- with "function memory_hybrid_search(...) does not exist". Keep this
+-- signature in lockstep with src/relate.ts whenever the call changes.
+--
+-- Body stays keyword-only: CI has no pgvector, and the integration-test job
+-- sets no OPENAI_API_KEY, so relate.ts passes query_embedding = NULL and runs
+-- keyword-only — the embedding-weighted args (full_text_weight /
+-- semantic_weight / rrf_k) are accepted for signature parity but unused here.
+-- score is synthesized from keyword overlap so the two seeded sessions clear
+-- Rumen's minSimilarity floor.
+--
+-- score is DOUBLE PRECISION, not NUMERIC: node-postgres returns NUMERIC as JS
+-- strings, and relate.ts drops any row where `typeof similarity !== 'number'`
+-- — a NUMERIC column would silently strand every related memory and write
+-- zero rumen_insights rows.
 -- ---------------------------------------------------------------------------
 DROP FUNCTION IF EXISTS memory_hybrid_search(text, vector, int, text);
+DROP FUNCTION IF EXISTS
+  memory_hybrid_search(text, vector, int, double precision, double precision, int, text, text);
 
 CREATE OR REPLACE FUNCTION memory_hybrid_search(
-  query_text      TEXT,
-  query_embedding vector,
-  limit_count     INT,
-  project_filter  TEXT
+  query_text         TEXT,
+  query_embedding    vector,
+  match_count        INT,
+  full_text_weight   DOUBLE PRECISION,
+  semantic_weight    DOUBLE PRECISION,
+  rrf_k              INT,
+  filter_project     TEXT,
+  filter_source_type TEXT
 )
 RETURNS TABLE (
   id          UUID,
@@ -76,51 +121,46 @@ RETURNS TABLE (
   source_type TEXT,
   project     TEXT,
   created_at  TIMESTAMPTZ,
-  -- DOUBLE PRECISION, not NUMERIC: node-postgres returns NUMERIC as JS
-  -- strings, and relate.ts filters out rows where `typeof similarity !==
-  -- 'number'`, so a NUMERIC column silently drops every related memory
-  -- and zero rumen_insights rows get written.
-  similarity  DOUBLE PRECISION
+  score       DOUBLE PRECISION
 )
-LANGUAGE plpgsql
+LANGUAGE sql
+STABLE
 AS $$
-DECLARE
-  needle TEXT;
-BEGIN
-  needle := LOWER(COALESCE(query_text, ''));
-  RETURN QUERY
-    SELECT
-      m.id,
-      m.content,
-      m.source_type,
-      m.project,
-      m.created_at,
-      (
-        CASE
-          WHEN needle = '' THEN 0.80
-          WHEN POSITION(SPLIT_PART(needle, ' ', 1) IN LOWER(m.content)) > 0 THEN 0.92
-          WHEN POSITION(needle IN LOWER(m.content)) > 0 THEN 0.85
-          ELSE 0.75
-        END
-      )::DOUBLE PRECISION AS similarity
-    FROM memory_items m
-    WHERE (project_filter IS NULL OR m.project = project_filter)
-    ORDER BY similarity DESC, m.created_at DESC
-    LIMIT limit_count;
-END;
+  SELECT
+    m.id,
+    m.content,
+    m.source_type,
+    m.project,
+    m.created_at,
+    (
+      CASE
+        WHEN COALESCE(query_text, '') = '' THEN 0.80
+        WHEN POSITION(LOWER(SPLIT_PART(query_text, ' ', 1)) IN LOWER(m.content)) > 0 THEN 0.92
+        WHEN POSITION(LOWER(query_text) IN LOWER(m.content)) > 0 THEN 0.85
+        ELSE 0.75
+      END
+    )::DOUBLE PRECISION AS score
+  FROM memory_items m
+  WHERE (filter_project IS NULL OR m.project = filter_project)
+    AND (filter_source_type IS NULL OR m.source_type = filter_source_type)
+  ORDER BY score DESC, m.created_at DESC
+  LIMIT match_count;
 $$;
 
 -- ---------------------------------------------------------------------------
 -- Seed data: two sessions in two projects, CORS-related content so Rumen's
 -- cross-project relate phase has something to chew on.
 -- ---------------------------------------------------------------------------
-INSERT INTO memory_sessions (id, project, summary, created_at) VALUES
-  ('11111111-1111-1111-1111-111111111111', 'project-alpha',
+INSERT INTO memory_sessions
+  (id, session_id, project, summary, started_at, ended_at, messages_count) VALUES
+  ('11111111-1111-1111-1111-111111111111', 'sess-alpha-0001', 'project-alpha',
    'Fixed CORS preflight by widening Access-Control-Allow-Headers',
-   NOW() - INTERVAL '2 hours'),
-  ('22222222-2222-2222-2222-222222222222', 'project-beta',
+   NOW() - INTERVAL '2 hours' - INTERVAL '20 minutes',
+   NOW() - INTERVAL '2 hours', 7),
+  ('22222222-2222-2222-2222-222222222222', 'sess-beta-0001', 'project-beta',
    'Added CORS middleware to express app for external api',
-   NOW() - INTERVAL '1 day');
+   NOW() - INTERVAL '1 day' - INTERVAL '35 minutes',
+   NOW() - INTERVAL '1 day', 9);
 
 INSERT INTO memory_items (session_id, content, source_type, project, created_at) VALUES
   ('11111111-1111-1111-1111-111111111111',
