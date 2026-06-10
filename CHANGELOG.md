@@ -14,8 +14,8 @@ _No unreleased changes._
 ### Changed — Sprint 42 T1: graph-inference Edge Function rewrite (LATERAL + HNSW)
 
 - **`fetchCandidatePairs` rewritten from naive nested-loop to LATERAL+HNSW per-row top-K.** The old shape (`FROM memory_items m1 JOIN memory_items m2 ON m1.id < m2.id WHERE (m1.embedding <=> m2.embedding) <= cutoff`) put the cosine constraint as a **post-join Filter**, never as an `ORDER BY <=>` LIMIT-K, so the HNSW index `memory_items_embedding_idx` was never consulted. EXPLAIN confirmed `Nested Loop` over `Seq Scan(m1) × IndexScan(memory_items_pkey, m2)` with 3.6M estimated rows — the source of the 150s+ Edge Function timeouts that have kept the cron disabled since Sprint 38 close. New shape: `FROM memory_items m1 CROSS JOIN LATERAL (SELECT ... FROM memory_items m2 WHERE ... ORDER BY m2.embedding <=> m1.embedding LIMIT $perRowK) nbr` — HNSW serves per-row top-K, `O(N²) → O(N log K)`. Symmetry handled via `LEAST/GREATEST(m1.id, nbr.id)` canonicalization + `DISTINCT ON` so pairs found from either direction dedupe. `since` filter applies only to outer `m1` (recent updates seed LATERAL searches; pairs where m2 was recently updated are caught when m2 is the outer in a different iteration).
-- **NEW `GRAPH_INFERENCE_PER_ROW_K` env var** (default 8) threads the LATERAL `LIMIT` through `runGraphInference`. Lower values risk missing pairs in the 0.85-0.90 similarity band; default 8 was empirically sufficient on petvetbid.
-- **Live validation against `petvetbid` corpus** (5,822 active memory_items, threshold=0.85, since=NULL, perRowK=8, maxPairs=5000): **360 unique pairs returned in 13.5s wall-clock** (vs 150s+ timeout pre-rewrite — **11x perf**), similarity range 0.850-1.000, 45 of 360 are cross-project edges (the cohort the cron exists to surface — intra-project edges are already written in real time by rag-system's MCP-side classifier). EXPLAIN ANALYZE confirmed `Index Scan using memory_items_embedding_idx, Order By: (embedding <=> m1.embedding), Limit 8`. Steady-state runs will be sub-second once `since` filter kicks in (only re-scans recently-updated rows). 13.5s exceeds the 10s acceptance target by ~3s on cold start; vastly within Edge Function 150s wall-clock.
+- **NEW `GRAPH_INFERENCE_PER_ROW_K` env var** (default 8) threads the LATERAL `LIMIT` through `runGraphInference`. Lower values risk missing pairs in the 0.85-0.90 similarity band; default 8 was empirically sufficient on the daily-driver project.
+- **Live validation against the daily-driver project corpus** (5,822 active memory_items, threshold=0.85, since=NULL, perRowK=8, maxPairs=5000): **360 unique pairs returned in 13.5s wall-clock** (vs 150s+ timeout pre-rewrite — **11x perf**), similarity range 0.850-1.000, 45 of 360 are cross-project edges (the cohort the cron exists to surface — intra-project edges are already written in real time by rag-system's MCP-side classifier). EXPLAIN ANALYZE confirmed `Index Scan using memory_items_embedding_idx, Order By: (embedding <=> m1.embedding), Limit 8`. Steady-state runs will be sub-second once `since` filter kicks in (only re-scans recently-updated rows). 13.5s exceeds the 10s acceptance target by ~3s on cold start; vastly within Edge Function 150s wall-clock.
 
 ### Notes
 
@@ -23,7 +23,7 @@ _No unreleased changes._
 - **Operational deploy steps after publish (Joshua's Passkey required for cron re-enable):**
   ```
   cd ~/Documents/Graciella/rumen
-  supabase functions deploy graph-inference --project-ref luvvbrpaopnblvxdxwzb
+  supabase functions deploy graph-inference --project-ref <your-project-ref>
   # then re-enable the cron via the now-correctly-templated migration 003
   # then manually fire once via cron's pg_net path to confirm the ~360 cross-project edges land
   ```

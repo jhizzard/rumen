@@ -135,7 +135,7 @@ async function fetchCandidatePairs(
   // m2 is the outer m1 (which IS recent). So filtering only m1 by `since`
   // is sufficient and saves ~99% of work in steady state.
   //
-  // EXPLAIN ANALYZE on petvetbid corpus (5,822 active rows, 2026-04-28):
+  // EXPLAIN ANALYZE on the daily-driver project corpus (5,822 active rows, 2026-04-28):
   // 13.5s cold start (since=NULL), HNSW correctly engaged, 718 raw
   // matches → 359 unique pairs at threshold 0.85.
   const result = await sql.unsafe(
