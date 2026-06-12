@@ -9,6 +9,15 @@
  *   - NO question generation  (reserved for v0.3)
  *   - Non-destructive: only INSERTs into rumen_jobs and rumen_insights.
  *
+ * Doctrine as of v0.6 (two deliberate, narrow, documented amendments —
+ * see docs/MNESTRA-COMPATIBILITY.md § What Rumen writes):
+ *   - Sprint 53: the insight cycle UPDATEs memory_sessions.rumen_processed_at
+ *     (its idempotency stamp) — see stampSessionsProcessed below.
+ *   - Sprint 76: the promotion pass (src/promote.ts) INSERTs into
+ *     memory_items (promoting quarantined web proposals to canonical) and
+ *     UPDATEs ONLY memory_inbox status/metadata fields on rows it claimed.
+ * Rumen still NEVER modifies or deletes existing memory rows.
+ *
  * WARNING: Rumen v0.1 writes to a `rumen_insights` table. It does NOT modify
  * or delete any existing memory rows. Run against a TEST instance for the
  * first two weeks of use. Do NOT point at production memory stores until
@@ -35,6 +44,20 @@ export {
   makePlaceholderInsight,
 } from './synthesize.js';
 export { surfaceInsights } from './surface.js';
+export {
+  promoteInbox,
+  stripPrivate,
+  REJECTION_REASONS,
+  WEB_SOURCE_AGENTS,
+} from './promote.js';
+export type {
+  PromoteOptions,
+  PromoteDeps,
+  PromoteSummary,
+  MemoryInboxRow,
+  RejectionReason,
+  StripPrivateResult,
+} from './promote.js';
 export type {
   RumenJob,
   RumenInsight,

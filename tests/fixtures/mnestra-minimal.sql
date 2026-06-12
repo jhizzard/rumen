@@ -148,6 +148,108 @@ AS $$
 $$;
 
 -- ---------------------------------------------------------------------------
+-- memory_inbox — Sprint 76 quarantine table for web-chat proposals.
+--
+-- SOURCE OF TRUTH: engram migrations/026_memory_inbox.sql (Sprint 76 T1).
+-- This fixture mirrors the COLUMNS, CHECKs, and indexes the promotion pass
+-- (src/promote.ts) touches — keep it in lockstep whenever 026 changes. The
+-- RLS gates, the memory_propose RPC, and the grant hygiene are deliberately
+-- NOT mirrored: the CI fixture runs in a service/superuser context where
+-- they would be untestable theater; T1's migration + tests own that surface.
+--
+-- The promotion pass claims pending rows (FOR UPDATE SKIP LOCKED), then
+-- promotes (INSERT memory_items + status='promoted' + promoted_memory_id in
+-- one transaction) or rejects (status='rejected' + rejection_reason). The
+-- status-consistency CHECKs keep the audit trail honest.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS memory_inbox (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  source_agent       TEXT NOT NULL,
+  project_hint       TEXT,
+  text               TEXT NOT NULL,
+  status             TEXT NOT NULL DEFAULT 'pending'
+                     CHECK (status IN ('pending', 'promoted', 'rejected')),
+  promoted_memory_id UUID REFERENCES memory_items(id) ON DELETE SET NULL,
+  rejection_reason   TEXT,
+  metadata           JSONB NOT NULL DEFAULT '{}'::jsonb,
+  CONSTRAINT memory_inbox_promoted_consistency
+    CHECK (promoted_memory_id IS NULL OR status = 'promoted'),
+  CONSTRAINT memory_inbox_rejected_consistency
+    CHECK (rejection_reason IS NULL OR status = 'rejected')
+);
+
+-- The promotion pass's claim scan (mirrors 026's partial pending index,
+-- name and column per the landed migration).
+CREATE INDEX IF NOT EXISTS memory_inbox_status_pending_idx
+  ON memory_inbox (status)
+  WHERE status = 'pending';
+
+CREATE INDEX IF NOT EXISTS memory_inbox_created_at_idx
+  ON memory_inbox (created_at DESC);
+
+-- Per-connector accounting (rate-cap gate groups by source_agent).
+CREATE INDEX IF NOT EXISTS memory_inbox_source_agent_idx
+  ON memory_inbox (source_agent);
+
+-- ---------------------------------------------------------------------------
+-- match_memories — dedup-gate fixture stand-in.
+--
+-- Canonical signature (engram migration 001): match_memories(query_embedding
+-- vector(1536), match_threshold float, match_count int, filter_project text)
+-- RETURNS (id, content, source_type, category, project, metadata,
+-- similarity). src/promote.ts calls it with the remember.ts thresholds
+-- (0.88 / 0.95) for the duplicate / near-duplicate gates.
+--
+-- CI has no pgvector (`vector` is the NUMERIC[] domain above), so cosine
+-- similarity is impossible. The stand-in is DETERMINISTIC instead: it reads
+-- element 1 of the query embedding as the similarity it reports against
+-- every memory_items row. A test that wants "0.97 duplicate" injects an
+-- embedding starting [0.97, ...]; one that wants "no match" injects
+-- [0.5, ...] (below the 0.88 threshold). NOTE: NUMERIC[] literals use
+-- '{0.97,0.5}' array syntax here, NOT pgvector's '[...]' — unit tests mock
+-- the pool anyway; this function exists for schema parity and any future
+-- real-PG integration coverage. category is NULL (fixture memory_items has
+-- no category column; the canonical table does).
+-- ---------------------------------------------------------------------------
+DROP FUNCTION IF EXISTS
+  match_memories(vector, double precision, int, text);
+
+CREATE OR REPLACE FUNCTION match_memories(
+  query_embedding vector,
+  match_threshold DOUBLE PRECISION,
+  match_count     INT,
+  filter_project  TEXT DEFAULT NULL
+)
+RETURNS TABLE (
+  id          UUID,
+  content     TEXT,
+  source_type TEXT,
+  category    TEXT,
+  project     TEXT,
+  metadata    JSONB,
+  similarity  DOUBLE PRECISION
+)
+LANGUAGE sql
+STABLE
+AS $$
+  SELECT
+    m.id,
+    m.content,
+    m.source_type,
+    NULL::TEXT AS category,
+    m.project,
+    '{}'::JSONB AS metadata,
+    ((query_embedding::NUMERIC[])[1])::DOUBLE PRECISION AS similarity
+  FROM memory_items m
+  WHERE (filter_project IS NULL OR m.project = filter_project)
+    AND (query_embedding::NUMERIC[])[1] IS NOT NULL
+    AND ((query_embedding::NUMERIC[])[1])::DOUBLE PRECISION >= match_threshold
+  ORDER BY m.created_at DESC
+  LIMIT match_count;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Seed data: two sessions in two projects, CORS-related content so Rumen's
 -- cross-project relate phase has something to chew on.
 -- ---------------------------------------------------------------------------

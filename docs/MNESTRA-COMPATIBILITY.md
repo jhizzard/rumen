@@ -65,9 +65,13 @@ If your Mnestra fork returns additional columns, Rumen will ignore them — the 
 
 ## What Rumen writes
 
-Rumen **only** writes to its own tables (`rumen_jobs`, `rumen_insights`, `rumen_questions`). It never INSERTs, UPDATEs, or DELETEs any row in `memory_items` or `memory_sessions`.
+Rumen's default posture: it writes to its own tables (`rumen_jobs`, `rumen_insights`, `rumen_questions`) and **never modifies or deletes existing memory rows**. Exactly three write surfaces outside `rumen_*` exist, each deliberate, narrow, and documented:
 
-This is the core safety rule and every PR to Rumen must preserve it. See `CONTRIBUTING.md`.
+1. **`memory_sessions.rumen_processed_at` stamp** (v0.5 / Sprint 53, `src/index.ts::stampSessionsProcessed`) — the insight cycle's idempotency guard. Sets one timestamp column on sessions the picker consumed; touches no content fields.
+2. **`memory_items` INSERTs by the promotion pass** (v0.6 / Sprint 76, `src/promote.ts`) — promoting quarantined web-chat proposals from `memory_inbox` (engram migration 026) into canonical memory, reproducing `remember.ts` canonical-write semantics (text-embedding-3-large @ 1536, `match_memories` dedup at 0.88/0.95). New rows only. The near-duplicate band (0.88–0.95) REJECTS the proposal rather than updating the canonical near-dup — deliberately tighter than `remember.ts`: web-originated content must never mutate a canonical row.
+3. **`memory_inbox` status/metadata UPDATEs by the promotion pass** (same sprint) — claim stamps, `status` transitions (`pending` → `promoted`/`rejected`), `promoted_memory_id`, `rejection_reason`, and attempt counters, only on rows the pass claimed. Inbox rows are never deleted; they are the audit trail.
+
+No UPDATE or DELETE ever targets `memory_items`, and no write path outside the three above may be added. This is the core safety rule and every PR to Rumen must preserve it. See `CONTRIBUTING.md` ground rule 1.
 
 ## Breaking the contract
 
