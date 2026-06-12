@@ -4,7 +4,7 @@ Thanks for taking an interest. Rumen is small on purpose — please keep contrib
 
 ## Ground rules
 
-1. **Rumen is non-destructive.** Any PR that adds code that modifies or deletes rows in tables other than `rumen_*` will be rejected. Rumen only writes new rows into its own tables.
+1. **Rumen is non-destructive.** Rumen never modifies or deletes existing memory rows. Exactly three write surfaces outside `rumen_*` exist, each deliberate and documented (see `docs/MNESTRA-COMPATIBILITY.md` § What Rumen writes): the `memory_sessions.rumen_processed_at` idempotency stamp (Sprint 53), and the Sprint 76 promotion pass's INSERTs into `memory_items` plus status/metadata UPDATEs on `memory_inbox` rows it claimed. A PR that adds ANY other write path to a non-`rumen_*` table — or any UPDATE/DELETE touching existing memory content anywhere — will be rejected.
 2. **No LLM calls in v0.1.** Synthesis, question generation, and any calls to Anthropic/OpenAI/etc. are reserved for v0.2+. A v0.1 PR that adds a model call will be rejected.
 3. **Raw `pg` only, no ORMs.** See `docs/MNESTRA-COMPATIBILITY.md` for the reasoning.
 4. **Deno-compatible Edge Function.** Anything in `supabase/functions/` must run under Deno without a bundler. Keep imports standard-library or `npm:` specifiers.
@@ -26,6 +26,7 @@ Mirroring TermDeck's `[tag]` style:
 - `[rumen-synthesize]` — reserved for v0.2
 - `[rumen-question]` — reserved for v0.3
 - `[rumen-surface]` — surface phase
+- `[rumen-promote]` — memory_inbox promotion pass
 
 Format: `console.error('[rumen-extract] failed for session ' + sessionId + ':', err);`
 

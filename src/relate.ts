@@ -96,8 +96,14 @@ export async function relateSignals(
  * model. Returns null on any failure (timeout, non-2xx, malformed response,
  * network error). Per-signal error tolerance: the caller continues with
  * keyword-only matching for this signal while other signals proceed normally.
+ *
+ * Exported (Sprint 76): src/promote.ts reuses this exact path for the
+ * dedup gate so promotion embeddings match Mnestra's memory_items.embedding
+ * space (3-large @ 1536) — single source of truth, no drift. Note the
+ * null-on-failure contract: relate treats null as "fall back to keyword
+ * only"; promote treats null as a row failure (fail closed).
  */
-async function generateEmbedding(
+export async function generateEmbedding(
   text: string,
   apiKey: string,
 ): Promise<number[] | null> {
@@ -157,8 +163,9 @@ async function generateEmbedding(
 }
 
 // pgvector literal: '[0.1,0.2,...]' cast via $N::vector. The driver binds it
-// as text and Postgres handles the cast.
-function formatVectorLiteral(embedding: number[]): string {
+// as text and Postgres handles the cast. Exported (Sprint 76) for the
+// promote path's memory_items INSERT and match_memories dedup call.
+export function formatVectorLiteral(embedding: number[]): string {
   return '[' + embedding.join(',') + ']';
 }
 

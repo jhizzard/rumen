@@ -14,6 +14,13 @@ A rumen is the first chamber of a ruminant's stomach where food is continuously 
 
 Rumen is **non-destructive by design**. It only ever INSERTs new rows into its own tables (`rumen_jobs`, `rumen_insights`, `rumen_questions`). Nothing in your existing memory store is modified. Validate on a non-critical database first.
 
+Two deliberate, narrow, documented amendments to that rule (full detail in [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) § What Rumen writes):
+
+- the insight cycle stamps `memory_sessions.rumen_processed_at` (its idempotency guard);
+- the **inbox promotion pass** (`src/promote.ts`, Sprint 76) INSERTs new rows into `memory_items` — promoting quarantined web-chat proposals from `memory_inbox` to canonical — and UPDATEs ONLY `memory_inbox` status/metadata fields on rows it claimed.
+
+Rumen still **never modifies or deletes existing memory rows**.
+
 ---
 
 ## What Rumen does (v0.4)
@@ -84,6 +91,26 @@ Rumen is designed to run as a scheduled Supabase Edge Function, triggered by `pg
    SELECT * FROM rumen_jobs ORDER BY started_at DESC LIMIT 5;
    ```
 
+### Optional: the memory-inbox promotion pass (`inbox-promote`)
+
+If your store uses Mnestra's `memory_inbox` quarantine (engram migration 026 — web chats
+write proposals, CLIs write canonical), a second sibling Edge Function drains it
+asynchronously: dedup vs canonical (`match_memories`, remember.ts thresholds),
+kitchen-vs-recipe classification via Claude Haiku, then promote-or-reject with a full audit
+trail. Proposals become recallable on this cadence — by design, never synchronously.
+
+```bash
+supabase functions deploy inbox-promote
+supabase secrets set DATABASE_URL="$DATABASE_URL"
+supabase secrets set OPENAI_API_KEY="$OPENAI_API_KEY"        # dedup-gate embeddings
+supabase secrets set ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"  # kitchen-vs-recipe gate
+psql "$DATABASE_URL" -f migrations/003_pg_cron_inbox_promote.sql   # edit the URL first
+```
+
+Both model keys are required — without them the pass skips entirely rather than half-gating.
+Tuning knobs (defaults): `RUMEN_PROMOTE_BATCH` (25), `RUMEN_PROMOTE_RATE_CAP_24H` (50 per
+connector), `RUMEN_PROMOTE_MAX_ATTEMPTS` (5), `RUMEN_PROMOTE_CLAIM_LEASE_MINUTES` (10).
+
 ### Connection URL convention
 
 Per [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) and the operational lessons inherited from Podium, Rumen always uses Supabase **Shared Pooler IPv4** URLs, never Dedicated Pooler. The URL format:
@@ -122,6 +149,7 @@ Every log line in Rumen uses one of these tags:
 | `[rumen-synthesize]` | LLM synthesis via Claude Haiku |
 | `[rumen-question]` | Follow-up question generation |
 | `[rumen-surface]` | Writing insights back to DB |
+| `[rumen-promote]` | memory_inbox promotion pass (proposals → canonical or rejected) |
 
 This makes Supabase Edge Function logs trivially greppable.
 
