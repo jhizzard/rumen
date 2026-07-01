@@ -33,6 +33,12 @@ const KEYWORD_ONLY_FULL_TEXT_WEIGHT = 1.0;
 
 export interface RelateOptions {
   minSimilarity: number;
+  /**
+   * Wall-clock deadline (epoch ms) for the whole job. Past it, remaining
+   * signals skip embedding + hybrid search and return with no related
+   * memories, so the job can still finish inside the Edge Function wall.
+   */
+  deadlineAt?: number | null;
 }
 
 export async function relateSignals(
@@ -63,7 +69,18 @@ export async function relateSignals(
   );
 
   const out: RelatedSignal[] = [];
+  let deadlineTripped = false;
   for (const signal of signals) {
+    if (options.deadlineAt != null && Date.now() > options.deadlineAt) {
+      if (!deadlineTripped) {
+        deadlineTripped = true;
+        console.warn(
+          '[rumen-relate] job deadline reached — skipping relate for remaining signals',
+        );
+      }
+      out.push({ signal, related: [] });
+      continue;
+    }
     try {
       const embedding = apiKey
         ? await generateEmbedding(signal.search_text, apiKey)

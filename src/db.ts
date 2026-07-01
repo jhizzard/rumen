@@ -58,11 +58,32 @@ export function createPoolFromUrl(url: string): PgPool {
     // Transaction-mode pgbouncer requires statements to not rely on session
     // state. Keep queries simple and don't use prepared statements.
     idleTimeoutMillis: 10_000,
+    // node-postgres defaults BOTH of these to 0 = wait forever. Inside a
+    // Supabase Edge Function that means an unreachable/blackholed pooler
+    // endpoint rides the invocation all the way to the platform's 150s
+    // execution wall and dies as a 504 — every tick, indefinitely (observed
+    // 2026-06-28: rumen-tick 504'd every 15 min for 3+ days). Bound them so
+    // a dead DB fails the job in seconds with a real error message instead.
+    connectionTimeoutMillis: readIntEnv('RUMEN_DB_CONNECT_TIMEOUT_MS', 15_000),
+    query_timeout: readIntEnv('RUMEN_DB_QUERY_TIMEOUT_MS', 30_000),
   });
   pool.on('error', (err: Error) => {
     console.error('[rumen] pg pool error:', err);
   });
   return pool;
+}
+
+function readIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    console.error(
+      '[rumen] ' + name + '=' + raw + ' is not a positive integer; using default ' + fallback,
+    );
+    return fallback;
+  }
+  return parsed;
 }
 
 /**

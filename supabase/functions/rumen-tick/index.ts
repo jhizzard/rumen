@@ -20,7 +20,7 @@
 // @ts-ignore  Deno std import resolved at runtime.
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 // @ts-ignore  npm specifier resolved at runtime.
-import { runRumenJob, createPoolFromUrl } from 'npm:@jhizzard/rumen@0.1.0';
+import { runRumenJob, createPoolFromUrl } from 'npm:@jhizzard/rumen@0.6.1';
 
 // @ts-ignore  Deno global available at runtime.
 declare const Deno: { env: { get: (k: string) => string | undefined } };
@@ -47,11 +47,39 @@ serve(async (_req: Request) => {
 
   const pool = createPoolFromUrl(url);
 
+  // Watchdog: Supabase kills Edge Functions at 150s with an opaque 504.
+  // runRumenJob has its own internal ~110s degradation budget (v0.6.1), but
+  // if anything upstream of that hangs (e.g. an unreachable pooler on an old
+  // package version), this race guarantees a real JSON error response before
+  // the platform wall. Belt and suspenders.
+  const watchdogMs = (() => {
+    const raw = Deno.env.get('RUMEN_TICK_WATCHDOG_MS');
+    const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isNaN(parsed) || parsed <= 0 ? 140_000 : parsed;
+  })();
+  let watchdogTimer: number | undefined;
+  const watchdog = new Promise<never>((_, reject) => {
+    watchdogTimer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            'rumen-tick watchdog: job exceeded ' +
+              watchdogMs +
+              'ms — failing gracefully before the platform 150s kill',
+          ),
+        ),
+      watchdogMs,
+    ) as unknown as number;
+  });
+
   try {
     console.log('[rumen] edge function tick starting');
-    const summary = await runRumenJob(pool, {
-      triggeredBy: 'schedule',
-    });
+    const summary = await Promise.race([
+      runRumenJob(pool, {
+        triggeredBy: 'schedule',
+      }),
+      watchdog,
+    ]);
     console.log(
       '[rumen] edge function tick complete job_id=' +
         summary.job_id +
@@ -80,6 +108,9 @@ serve(async (_req: Request) => {
       },
     );
   } finally {
+    if (watchdogTimer !== undefined) {
+      clearTimeout(watchdogTimer);
+    }
     try {
       await pool.end();
     } catch (err) {

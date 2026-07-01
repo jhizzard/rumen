@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.6.1] - 2026-07-01
+
+### Fixed — rumen-tick 150s Edge-Function wall (tick 504'd every 15 min on a field deployment for 3+ days)
+
+- **Whole-job wall-clock budget** (`RUMEN_TICK_BUDGET_MS`, default 110s). `runRumenJob` now computes a deadline; past it, Relate skips remaining signals (`related: []`) and Synthesize falls back to placeholder insights instead of making further LLM calls. The job always completes, stamps its sessions, and writes the job row — no more platform-kill mid-flight leaving `rumen_jobs` rows stuck in `running` and sessions unstamped.
+- **Bounded DB I/O.** `createPoolFromUrl` sets `connectionTimeoutMillis` (default 15s, `RUMEN_DB_CONNECT_TIMEOUT_MS`) and `query_timeout` (default 30s, `RUMEN_DB_QUERY_TIMEOUT_MS`). node-postgres defaults both to 0 = wait forever, so an unreachable pooler endpoint previously rode every invocation to the platform's 150s kill.
+- **Bounded LLM I/O.** The Anthropic client now sets `timeout` (default 30s, `RUMEN_LLM_TIMEOUT_MS`) and `maxRetries: 1` instead of the SDK defaults (10 min / 2 retries). A failed batch already falls back to placeholders.
+- **Edge wrapper watchdog.** `supabase/functions/rumen-tick/index.ts` races `runRumenJob` against a 140s timer (`RUMEN_TICK_WATCHDOG_MS`) and returns a real JSON 500 (`rumen-tick watchdog: …`) instead of an opaque platform 504 if anything upstream of the package-level guards hangs. Wrapper's npm pin bumped `0.1.0` → `0.6.1` (the bundled TermDeck copy keeps its `__RUMEN_VERSION__` placeholder).
+
+### Redeploy note for existing installs
+
+The package-level guards only take effect after the Edge Function is redeployed (the `npm:` pin freezes the package version at deploy time): `supabase functions deploy rumen-tick --project-ref <your-project-ref>`, or re-run the stack installer's Rumen refresh.
+
 ## [0.4.4] - 2026-04-29
 
 ### Changed — Sprint 42 T1: graph-inference Edge Function rewrite (LATERAL + HNSW)

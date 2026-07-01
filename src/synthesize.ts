@@ -73,6 +73,7 @@ export function createSynthesizeContext(
     outputTokens: overrides.outputTokens ?? 0,
     softCapTripped: overrides.softCapTripped ?? false,
     apiKeyMissing: overrides.apiKeyMissing ?? apiKey.length === 0,
+    deadlineAt: overrides.deadlineAt ?? null,
   };
 }
 
@@ -118,6 +119,17 @@ export async function synthesizeInsights(
     const batch = withRelated.slice(i, i + BATCH_SIZE);
 
     if (ctx.softCapTripped) {
+      for (const rs of batch) {
+        out.push(makePlaceholderInsight(rs));
+      }
+      continue;
+    }
+
+    if (ctx.deadlineAt != null && Date.now() > ctx.deadlineAt) {
+      console.warn(
+        '[rumen-synthesize] job deadline reached — falling back to placeholder for remaining signals',
+      );
+      ctx.softCapTripped = true;
       for (const rs of batch) {
         out.push(makePlaceholderInsight(rs));
       }
@@ -676,8 +688,15 @@ export interface AnthropicMessageResponse {
 }
 
 function createAnthropicClient(): AnthropicLike {
+  // The SDK's defaults (10-minute timeout, 2 retries with backoff) are sized
+  // for interactive servers, not a Supabase Edge Function with a 150s
+  // execution wall. A single stalled request at the defaults rides the whole
+  // invocation to a platform 504. Bound it tightly; a failed batch falls
+  // back to placeholder insights anyway.
   return new Anthropic({
     apiKey: process.env['ANTHROPIC_API_KEY'],
+    timeout: readIntEnv('RUMEN_LLM_TIMEOUT_MS', 30_000),
+    maxRetries: 1,
   }) as unknown as AnthropicLike;
 }
 

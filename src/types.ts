@@ -150,6 +150,12 @@ export interface SynthesizeContext {
   softCapTripped: boolean;
   /** True if no ANTHROPIC_API_KEY is set — synthesize is effectively a no-op. */
   apiKeyMissing: boolean;
+  /**
+   * Wall-clock deadline (epoch ms) for the whole job. Past it, remaining
+   * batches fall back to placeholders instead of making LLM calls, so the
+   * job finishes inside the Edge Function's 150s execution wall.
+   */
+  deadlineAt?: number | null;
 }
 
 /** Options passed into runRumenJob. All fields are optional. */
@@ -164,6 +170,14 @@ export interface RunRumenJobOptions {
   minSimilarity?: number;
   /** Minimum event count for a session to count. Defaults to 3. */
   minEventCount?: number;
+  /**
+   * Wall-clock budget for the whole job in ms. Defaults to
+   * RUMEN_TICK_BUDGET_MS env, then 110_000 — comfortably under the Supabase
+   * Edge Function 150s execution wall. Past the deadline the job degrades
+   * gracefully (keyword-only relate, placeholder insights) instead of being
+   * killed mid-flight by the platform.
+   */
+  budgetMs?: number;
 }
 
 /** Summary returned from runRumenJob. */

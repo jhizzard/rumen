@@ -80,6 +80,11 @@ const DEFAULT_LOOKBACK_HOURS = 72;
 // effective floor for "better than nothing" under this scoring model.
 const DEFAULT_MIN_SIMILARITY = 0.01;
 const DEFAULT_MIN_EVENT_COUNT = 3;
+// Whole-job wall-clock budget. Supabase Edge Functions are killed at 150s;
+// past this deadline the job degrades (relate skips remaining signals,
+// synthesize falls back to placeholders) so it always finishes and stamps
+// its sessions instead of dying as a platform 504 and re-picking forever.
+const DEFAULT_TICK_BUDGET_MS = 110_000;
 
 export async function runRumenJob(
   pool: PgPool,
@@ -90,6 +95,8 @@ export async function runRumenJob(
   const lookbackHours = options.lookbackHours ?? DEFAULT_LOOKBACK_HOURS;
   const minSimilarity = options.minSimilarity ?? DEFAULT_MIN_SIMILARITY;
   const minEventCount = options.minEventCount ?? DEFAULT_MIN_EVENT_COUNT;
+  const budgetMs = options.budgetMs ?? readBudgetMsFromEnv();
+  const deadlineAt = Date.now() + budgetMs;
 
   console.log(
     '[rumen] starting job triggeredBy=' +
@@ -119,12 +126,13 @@ export async function runRumenJob(
     // 3. Relate.
     const related = await relateSignals(pool, extractResult.signals, {
       minSimilarity,
+      deadlineAt,
     });
 
     // 4. Synthesize. Hard-cap errors bubble up; on any other error we fall
     //    back to v0.1-style placeholder insights so the job still surfaces
     //    something.
-    const synthCtx = createSynthesizeContext();
+    const synthCtx = createSynthesizeContext({ deadlineAt });
     let insights: Insight[];
     try {
       insights = await synthesizeInsights(related, synthCtx);
@@ -333,6 +341,24 @@ function toSummary(row: CompletedJobRow): RumenJobSummary {
     completed_at: row.completed_at,
     error_message: row.error_message,
   };
+}
+
+function readBudgetMsFromEnv(): number {
+  const raw = process.env['RUMEN_TICK_BUDGET_MS'];
+  if (!raw) {
+    return DEFAULT_TICK_BUDGET_MS;
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    console.error(
+      '[rumen] RUMEN_TICK_BUDGET_MS=' +
+        raw +
+        ' is not a positive integer; falling back to default ' +
+        DEFAULT_TICK_BUDGET_MS,
+    );
+    return DEFAULT_TICK_BUDGET_MS;
+  }
+  return parsed;
 }
 
 function readMaxSessionsFromEnv(): number {
