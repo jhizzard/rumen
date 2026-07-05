@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.7.0] - 2026-07-05
+
+### Added — doctrine-scan (detect + synthesize)
+- Migration `004_doctrine_registry.sql`: `doctrine_registry` (status enum `candidate|drafted|proposed|ratified|rejected|superseded`, `cluster_member_ids`, `centroid vector(1536)`, `occurrence_count`, `projects[]`, `reinforced_after_ratification`, member content-hash snapshot, `origin`) + a `doctrine_jobs` heartbeat — RLS enabled on both, no PUBLIC write path. Migration `005_pg_cron_doctrine_scan.sql`: 03:30 UTC schedule (after graph-inference's 03:00), reuses the `rumen_service_role_key` Vault secret.
+- Edge Function `doctrine-scan` (`src/doctrine-scan.ts` + `supabase/functions/doctrine-scan/`): density clustering over the curated pool (mean pairwise ≥ 0.85; N ≥ 3 and ≥ 2 projects or ≥ 21d spread), centroid-fingerprint dedup, Haiku synthesis (cap 10 calls/scan, kitchen-vs-recipe classifier, evidence = dates + gists, no verbatim quotes), `trigger_hints` **shadow-mode only**, fail-soft no-key path parks `status='candidate'`, per-scan substrate-sanity heartbeat. **DB-detect-only inside `rumen_*` tables** (CONTRIBUTING ground-rule-1) — flow-back to `memory_items` is termdeck's job, never rumen's.
+- `README.md` / `MNESTRA-COMPATIBILITY.md` flow-back claims corrected.
+
+### Notes
+- Sprint 79 T2, FINAL-VERDICT GREEN on code/tests; live-landedness pending ORCH apply. `npm test` **126/127** (+1 skip), typecheck/build clean. Companions: `@jhizzard/mnestra@0.8.0` + `@jhizzard/termdeck@1.13.0`.
+
 ## [0.6.1] - 2026-07-01
 
 ### Fixed — rumen-tick 150s Edge-Function wall (tick 504'd every 15 min on a field deployment for 3+ days)

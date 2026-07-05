@@ -12,7 +12,7 @@ A rumen is the first chamber of a ruminant's stomach where food is continuously 
 
 > **WARNING:** Rumen v0.1 writes to a `rumen_insights` table. It does NOT modify or delete any existing memory rows. Run against a TEST instance for the first two weeks of use. Do NOT point at production memory stores until validated.
 
-Rumen is **non-destructive by design**. It only ever INSERTs new rows into its own tables (`rumen_jobs`, `rumen_insights`, `rumen_questions`). Nothing in your existing memory store is modified. Validate on a non-critical database first.
+Rumen is **non-destructive by design**. It only ever INSERTs (or, for its own rows, UPDATEs) into its own tables — `rumen_jobs`, `rumen_insights`, `rumen_questions`, and, as of Sprint 79, `doctrine_registry` / `doctrine_jobs`. Nothing in your existing memory store is modified. Validate on a non-critical database first.
 
 Two deliberate, narrow, documented amendments to that rule (full detail in [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) § What Rumen writes):
 
@@ -111,6 +111,29 @@ Both model keys are required — without them the pass skips entirely rather tha
 Tuning knobs (defaults): `RUMEN_PROMOTE_BATCH` (25), `RUMEN_PROMOTE_RATE_CAP_24H` (50 per
 connector), `RUMEN_PROMOTE_MAX_ATTEMPTS` (5), `RUMEN_PROMOTE_CLAIM_LEASE_MINUTES` (10).
 
+### Optional: the doctrine-scan pass (`doctrine-scan`)
+
+A third sibling Edge Function turns repeated kitchen-level lessons (decision / architecture /
+preference / bug_fix memories) into ratified, recallable doctrine. It runs DB-side density
+clustering over graph-inference's `memory_relationships` edges, then Haiku-synthesizes a
+title/doctrine_text/evidence for each qualifying cluster into its own `doctrine_registry`
+table. This pass **detects and drafts only** — it never writes `memory_items`; materializing
+a doctrine PR and ratifying it into recallable memory is a separate downstream tool.
+
+```bash
+supabase functions deploy doctrine-scan
+supabase secrets set DATABASE_URL="$DATABASE_URL"
+supabase secrets set ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"  # optional — see below
+psql "$DATABASE_URL" -f migrations/004_doctrine_registry.sql       # doctrine_registry + doctrine_jobs tables
+psql "$DATABASE_URL" -f migrations/005_pg_cron_doctrine_scan.sql   # edit the URL first
+```
+
+Unlike `inbox-promote`, `ANTHROPIC_API_KEY` is optional, not required: without it, detection
+(density clustering + candidate rows) still runs in full every scan — new candidates simply
+park at `status='candidate'` until a key is available, distinguishable in `doctrine_jobs.note`
+from a genuine flatline. Tuning knobs (defaults): `DOCTRINE_SCAN_MAX_LLM_CALLS` (10 per scan),
+`DOCTRINE_SCAN_BUDGET_MS` (110000).
+
 ### Connection URL convention
 
 Per [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) and the operational lessons inherited from Podium, Rumen always uses Supabase **Shared Pooler IPv4** URLs, never Dedicated Pooler. The URL format:
@@ -150,6 +173,7 @@ Every log line in Rumen uses one of these tags:
 | `[rumen-question]` | Follow-up question generation |
 | `[rumen-surface]` | Writing insights back to DB |
 | `[rumen-promote]` | memory_inbox promotion pass (proposals → canonical or rejected) |
+| `[rumen-doctrine-scan]` | Density clustering + Haiku synthesis into `doctrine_registry` |
 
 This makes Supabase Edge Function logs trivially greppable.
 
@@ -185,7 +209,9 @@ Nothing else does this:
 - LangGraph orchestrates agents — it doesn't have persistent cross-project memory.
 - Cursor / Copilot are in-editor assistants — they forget when you close the editor.
 
-Rumen keeps working when you stop. It cross-references across all your projects automatically, and (in future versions) asks you follow-up questions about work you thought was done. The moat is the loop: your memory store captures → Rumen learns → insights flow back into the store. Each pass makes the store smarter about you specifically.
+Rumen keeps working when you stop. It cross-references across all your projects automatically, and (in future versions) asks you follow-up questions about work you thought was done. The moat is the loop: your memory store captures → Rumen learns → insights land in Rumen's own store (`rumen_insights`), queryable alongside Mnestra's. Each pass makes your combined memory smarter about you specifically.
+
+(Rumen's own write boundary is narrower than that framing implies: `rumen_insights` rows are never copied into `memory_items` by Rumen itself. Two deliberate, narrow exceptions do write into Mnestra's tables from within this repo — the `memory_sessions.rumen_processed_at` stamp and the Sprint 76 promotion pass — see the Safety Warning above and [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) § What Rumen writes for the exhaustive list. As of Sprint 79, Rumen also detects and drafts candidate doctrine into its own `doctrine_registry` table; the actual `memory_items` flow-back for a *ratified* doctrine is performed by a separate downstream tool, not by Rumen.)
 
 ---
 

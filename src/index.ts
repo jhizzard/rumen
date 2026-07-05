@@ -58,6 +58,26 @@ export type {
   RejectionReason,
   StripPrivateResult,
 } from './promote.js';
+export {
+  runDoctrineScan,
+  parseVectorLiteral,
+  cosineSimilarity,
+  meanPairwiseSimilarity,
+  computeCentroid,
+  findConnectedComponents,
+  splitIncoherentComponent,
+  qualifiesStructurally,
+  validateVerdict,
+  CURATED_SOURCE_TYPES,
+  CLUSTER_EDGE_TYPES,
+} from './doctrine-scan.js';
+export type {
+  DoctrineScanOptions,
+  DoctrineScanDeps,
+  DoctrineScanSummary,
+  DoctrineVerdict,
+  PoolNode,
+} from './doctrine-scan.js';
 export type {
   RumenJob,
   RumenInsight,

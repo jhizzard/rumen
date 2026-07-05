@@ -65,7 +65,7 @@ If your Mnestra fork returns additional columns, Rumen will ignore them — the 
 
 ## What Rumen writes
 
-Rumen's default posture: it writes to its own tables (`rumen_jobs`, `rumen_insights`, `rumen_questions`) and **never modifies or deletes existing memory rows**. Exactly three write surfaces outside `rumen_*` exist, each deliberate, narrow, and documented:
+Rumen's default posture: it writes to its own tables — `rumen_jobs`, `rumen_insights`, `rumen_questions`, and, as of Sprint 79, `doctrine_registry` / `doctrine_jobs` (named per the doctrine-scan DISPATCH-GUIDE, not `rumen_`-prefixed, but exclusively written by Rumen's own doctrine-scan pass and part of the same non-destructive safe zone) — and **never modifies or deletes existing memory rows**. Exactly three write surfaces outside Rumen's own tables exist, each deliberate, narrow, and documented:
 
 1. **`memory_sessions.rumen_processed_at` stamp** (v0.5 / Sprint 53, `src/index.ts::stampSessionsProcessed`) — the insight cycle's idempotency guard. Sets one timestamp column on sessions the picker consumed; touches no content fields.
 2. **`memory_items` INSERTs by the promotion pass** (v0.6 / Sprint 76, `src/promote.ts`) — promoting quarantined web-chat proposals from `memory_inbox` (engram migration 026) into canonical memory, reproducing `remember.ts` canonical-write semantics (text-embedding-3-large @ 1536, `match_memories` dedup at 0.88/0.95). New rows only. The near-duplicate band (0.88–0.95) REJECTS the proposal rather than updating the canonical near-dup — deliberately tighter than `remember.ts`: web-originated content must never mutate a canonical row.
