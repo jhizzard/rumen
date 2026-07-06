@@ -78,6 +78,18 @@ export type {
   DoctrineVerdict,
   PoolNode,
 } from './doctrine-scan.js';
+export {
+  runRumenReinforce,
+  computeRecallBoost,
+  DEFAULT_TUNABLES,
+} from './reinforce.js';
+export type {
+  ReinforceOptions,
+  ReinforceSummary,
+  ReinforceTunables,
+  RecallBoostInput,
+  BoostUpdate,
+} from './reinforce.js';
 export type {
   RumenJob,
   RumenInsight,

@@ -15,22 +15,35 @@
  *     model is asked to return `{ insights: [{ key, text, cited_ids }, ...] }`
  *     and we match results back by signal key.
  *
- * Confidence score:
+ * Confidence score (v2 — recalibrated against the RRF band):
  *   confidence = clamp01(
- *       0.5 * maxSimilarity                      (0..0.5)
- *     + 0.3 * crossProjectBonus                  (0 or 0.3)
- *     + 0.2 * ageSpreadBonus                     (0..0.2)
+ *       ( 0.55 * simScore                        (0..0.55)
+ *       + 0.30 * crossProjectBonus               (0 or 0.30)
+ *       + 0.15 * ageSpreadBonus )                (0..0.15)
+ *     * noveltyFactor                            (NOVELTY_FLOOR, 1]
  *   )
- *   - maxSimilarity: highest similarity across related memories (already 0..1).
+ *   - simScore: normalizeSimilarity(maxRrf) — the highest related-memory score
+ *     mapped from Mnestra's RRF band (0.01–0.3) onto 0..1. Pre-v2 the raw RRF
+ *     score was read as if it were 0..1, so this term contributed ~0.05 and was
+ *     drowned ~6:1 by the flat cross-project bonus. See src/confidence.ts.
  *   - crossProjectBonus: 1 if the signal is supported by ≥2 distinct projects
- *     (cross-project prior art is Rumen's whole pitch), else 0.
+ *     (cross-project prior art is Rumen's whole pitch), else 0. Still meaningful
+ *     but no longer able to dominate a strong same-project match.
  *   - ageSpreadBonus: 1 if the oldest related memory is ≥14 days older than
  *     the newest, else scaled linearly. Older-than-newest stretches suggest
  *     durable, recurring patterns rather than a one-off.
+ *   - noveltyFactor: down-ranks near-duplicate prior art. N near-identical
+ *     related memories are ONE piece of evidence duplicated, not N corroborating
+ *     sources, so the composite is scaled by content diversity. An all-duplicate
+ *     cluster of N yields 0.5 + 0.5/N — approaching NOVELTY_FLOOR asymptotically
+ *     but staying strictly above it, so a real match is never zeroed outright.
  */
 
 import Anthropic from '@anthropic-ai/sdk';
-import { normalize as normalizeConfidence } from './confidence.js';
+import {
+  normalize as normalizeConfidence,
+  normalizeSimilarity,
+} from './confidence.js';
 import type {
   Insight,
   RelatedMemory,
@@ -43,12 +56,16 @@ const DEFAULT_SOFT_CAP = 100;
 const DEFAULT_HARD_CAP = 500;
 const BATCH_SIZE = 3;
 const MAX_TOKENS = 600;
+const DAY_MS = 86_400_000;
 
 const SYSTEM_PROMPT =
   'You are Rumen, an async learning layer that surfaces cross-project prior art ' +
   'from a developer memory store. For each signal you receive, write ONE short ' +
   'insight (1–3 sentences, max 60 words) that names the pattern in the related ' +
-  'memories and connects it to the current signal. Cite the specific memories ' +
+  'memories and connects it to the current signal. Favor patterns that recur ' +
+  'across multiple projects, and note when the prior art is recent or ' +
+  'long-standing (each memory lists its age and each signal its cross-project ' +
+  'spread). Cite the specific memories ' +
   'you drew from using short IDs in the form [#xxxxxxxx] (first 8 characters of ' +
   'the memory UUID). Do not cite a memory you did not use. Do not invent details ' +
   'not present in the provided content. Respond with a single JSON object of the ' +
@@ -247,7 +264,23 @@ async function synthesizeBatch(
   return out;
 }
 
-function buildUserPrompt(batch: RelatedSignal[]): string {
+/**
+ * Build the Haiku user prompt for a batch of signals.
+ *
+ * v2 enriches each signal block with recency/age and cross-project spread so
+ * the model can ground its insight in HOW recent and HOW broad the prior art is
+ * (not just its content):
+ *   - a per-signal "cross-project spread" line (distinct project count + names),
+ *   - a per-signal "recency" line (age of the newest and oldest related memory),
+ *   - a per-memory `age=Nd` field alongside similarity/source_type.
+ *
+ * `nowMs` is injectable so age math is deterministic under test; production
+ * callers use the default wall clock. Exported for direct unit testing.
+ */
+export function buildUserPrompt(
+  batch: RelatedSignal[],
+  nowMs: number = Date.now(),
+): string {
   const parts: string[] = [];
   parts.push(
     'Here are ' +
@@ -260,6 +293,11 @@ function buildUserPrompt(batch: RelatedSignal[]): string {
     parts.push('=== SIGNAL key=' + rs.signal.key + ' ===');
     parts.push('project: ' + (rs.signal.project ?? 'unknown'));
     parts.push('description: ' + rs.signal.description);
+    parts.push('cross-project spread: ' + describeSpread(rs.related));
+    const recency = describeRecency(rs.related, nowMs);
+    if (recency) {
+      parts.push('recency: ' + recency);
+    }
     parts.push('');
     parts.push('Related memories (use these for citations):');
     for (const r of rs.related) {
@@ -270,6 +308,8 @@ function buildUserPrompt(batch: RelatedSignal[]): string {
           shortId(r.id) +
           ' project=' +
           (r.project ?? 'unknown') +
+          ' age=' +
+          formatAge(r.created_at, nowMs) +
           ' similarity=' +
           r.similarity.toFixed(2) +
           ' source_type=' +
@@ -285,6 +325,66 @@ function buildUserPrompt(batch: RelatedSignal[]): string {
       'Every cited_id must be one of the full UUIDs from the memories above.',
   );
   return parts.join('\n');
+}
+
+/**
+ * Human-readable cross-project spread summary for a related set, e.g.
+ * "2 projects (alpha, beta) across 5 memories" or "1 project (alpha) across 1
+ * memory". Project names are de-duplicated and sorted for deterministic output.
+ */
+function describeSpread(related: RelatedMemory[]): string {
+  const projects = uniqueNonNull(related.map((r) => r.project)).sort();
+  const projectCount = projects.length;
+  const projectLabel = projectCount === 1 ? 'project' : 'projects';
+  const names = projects.length > 0 ? ' (' + projects.join(', ') + ')' : '';
+  const memLabel = related.length === 1 ? 'memory' : 'memories';
+  return (
+    projectCount +
+    ' ' +
+    projectLabel +
+    names +
+    ' across ' +
+    related.length +
+    ' ' +
+    memLabel
+  );
+}
+
+/**
+ * Recency window across a related set: age of the newest and oldest memory,
+ * e.g. "newest 2d ago, oldest 45d ago". Returns null if no created_at parses
+ * (so the caller can omit the line entirely).
+ */
+function describeRecency(
+  related: RelatedMemory[],
+  nowMs: number,
+): string | null {
+  const times = related
+    .map((r) => Date.parse(r.created_at))
+    .filter((n) => !Number.isNaN(n));
+  if (times.length === 0) return null;
+  const newestMs = Math.max(...times);
+  const oldestMs = Math.min(...times);
+  return (
+    'newest ' +
+    formatAgeMs(nowMs - newestMs) +
+    ' ago, oldest ' +
+    formatAgeMs(nowMs - oldestMs) +
+    ' ago'
+  );
+}
+
+/** Format a memory's age from its created_at, e.g. "3d" or "unknown". */
+function formatAge(createdAt: string, nowMs: number): string {
+  const ms = Date.parse(createdAt);
+  if (Number.isNaN(ms)) return 'unknown';
+  return formatAgeMs(nowMs - ms);
+}
+
+/** Format an elapsed-milliseconds span as whole days, floored at 0: "0d", "3d". */
+function formatAgeMs(elapsedMs: number): string {
+  const days = Math.max(0, Math.floor(elapsedMs / DAY_MS));
+  return days + 'd';
 }
 
 interface ParsedInsight {
@@ -576,29 +676,159 @@ function filterValidCitations(
   return out;
 }
 
+// Composite confidence weights (v2). Sum to 1.0. simScore now rides a real 0..1
+// scale (RRF-band normalized), so it leads; cross-project corroboration stays
+// meaningful (Rumen's core pitch) but can no longer dominate a strong match;
+// age spread is the weakest durability hint.
+const W_SIMILARITY = 0.55;
+const W_CROSS_PROJECT = 0.3;
+const W_AGE_SPREAD = 0.15;
+
+// ageSpreadBonus saturates once the oldest/newest related memories are this many
+// days apart — a durable, recurring pattern rather than a one-off.
+const AGE_SPREAD_SATURATION_DAYS = 14;
+
+// Near-duplicate handling. NOVELTY_FLOOR is the ASYMPTOTIC floor the novelty
+// multiplier tends toward, not a value any finite cluster reaches: the
+// multiplier is 0.5 + 0.5*distinctRatio, so an all-duplicate cluster of N gets
+// 0.5 + 0.5/N — always ABOVE 0.5, approaching it only as N grows. A real match
+// is therefore never zeroed, and small duplicate clusters keep a softer penalty
+// than large ones. NEAR_DUP_JACCARD is the token-set overlap at/above which two
+// memories count as the same piece of evidence.
+const NOVELTY_FLOOR = 0.5;
+const NEAR_DUP_JACCARD = 0.85;
+
 export function computeConfidence(rs: RelatedSignal): number {
   if (rs.related.length === 0) return 0;
 
-  const maxSim = rs.related.reduce((m, r) => Math.max(m, r.similarity), 0);
+  // Similarity: take the strongest related-memory score and map it from
+  // Mnestra's RRF band (0.01–0.3) onto 0..1 so it is not drowned by the flat
+  // cross-project bonus.
+  const maxRrf = rs.related.reduce((m, r) => Math.max(m, r.similarity), 0);
+  const simScore = normalizeSimilarity(maxRrf);
+
   const projects = new Set<string>();
   for (const r of rs.related) {
     if (r.project) projects.add(r.project);
   }
   const crossProjectBonus = projects.size >= 2 ? 1 : 0;
 
-  let ageSpreadBonus = 0;
-  const times = rs.related
-    .map((r) => Date.parse(r.created_at))
-    .filter((n) => !Number.isNaN(n));
-  if (times.length >= 2) {
-    const spreadDays =
-      (Math.max(...times) - Math.min(...times)) / (1000 * 60 * 60 * 24);
-    ageSpreadBonus = Math.min(1, spreadDays / 14);
-  }
+  const ageSpreadBonus = computeAgeSpreadBonus(rs.related);
 
-  const raw = 0.5 * maxSim + 0.3 * crossProjectBonus + 0.2 * ageSpreadBonus;
+  const composite =
+    W_SIMILARITY * simScore +
+    W_CROSS_PROJECT * crossProjectBonus +
+    W_AGE_SPREAD * ageSpreadBonus;
+
+  // Down-rank near-duplicate prior art before clamping.
+  const raw = composite * noveltyFactor(rs.related);
   const clamped = Math.max(0, Math.min(1, raw));
   return Math.round(clamped * 1000) / 1000;
+}
+
+/**
+ * ageSpreadBonus: 0..1, scaled by how many days separate the oldest and newest
+ * related memory (saturating at AGE_SPREAD_SATURATION_DAYS). A wide spread
+ * suggests a durable, recurring pattern rather than a one-off. Needs ≥2
+ * parseable timestamps; otherwise 0.
+ */
+function computeAgeSpreadBonus(related: RelatedMemory[]): number {
+  const times = related
+    .map((r) => Date.parse(r.created_at))
+    .filter((n) => !Number.isNaN(n));
+  if (times.length < 2) return 0;
+  const spreadDays = (Math.max(...times) - Math.min(...times)) / DAY_MS;
+  return Math.min(1, spreadDays / AGE_SPREAD_SATURATION_DAYS);
+}
+
+/**
+ * Novelty multiplier that down-ranks near-duplicate prior art. A cluster of N
+ * textually near-identical memories carries the evidentiary weight of ONE, not
+ * N, so we scale confidence by the fraction of DISTINCT content clusters:
+ *
+ *   noveltyFactor = NOVELTY_FLOOR + (1 - NOVELTY_FLOOR) * (distinctClusters / N)
+ *
+ * All-distinct → 1.0 (no penalty). An all-duplicate cluster of N → 0.5 + 0.5/N,
+ * which APPROACHES NOVELTY_FLOOR (0.5) as N grows but never reaches it — a
+ * finite duplicate cluster keeps a softer-than-floor multiplier, and a real
+ * match is never zeroed. The result range over real inputs is (NOVELTY_FLOOR, 1].
+ *
+ * Exported for direct unit testing.
+ */
+export function noveltyFactor(related: RelatedMemory[]): number {
+  if (related.length <= 1) return 1;
+  const distinct = countDistinctContentClusters(related);
+  const distinctRatio = distinct / related.length; // (0, 1]
+  return NOVELTY_FLOOR + (1 - NOVELTY_FLOOR) * distinctRatio;
+}
+
+/**
+ * Count distinct content clusters via union-find over a near-duplicate relation:
+ * two memories merge when their normalized content is identical OR their token
+ * sets overlap at/above NEAR_DUP_JACCARD. `related` is capped at TOP_K (5)
+ * upstream, so the O(n^2) pairwise pass is trivial.
+ */
+function countDistinctContentClusters(related: RelatedMemory[]): number {
+  const n = related.length;
+  const norm = related.map((r) => normalizeContent(r.content));
+  const tokens = norm.map(tokenizeContent);
+  const parent = Array.from({ length: n }, (_, i) => i);
+
+  const find = (x: number): number => {
+    let root = x;
+    while (parent[root] !== root) root = parent[root]!;
+    // Path-compress everything on the walk from x up to root.
+    let cur = x;
+    while (parent[cur] !== root) {
+      const next = parent[cur]!;
+      parent[cur] = root;
+      cur = next;
+    }
+    return root;
+  };
+  const union = (a: number, b: number): void => {
+    parent[find(a)] = find(b);
+  };
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (
+        norm[i] === norm[j] ||
+        jaccard(tokens[i]!, tokens[j]!) >= NEAR_DUP_JACCARD
+      ) {
+        union(i, j);
+      }
+    }
+  }
+
+  const roots = new Set<number>();
+  for (let i = 0; i < n; i++) roots.add(find(i));
+  return roots.size;
+}
+
+/** Lowercase, collapse runs of whitespace, trim. */
+function normalizeContent(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Token set of an already-normalized content string, split on non-alphanumerics. */
+function tokenizeContent(normalized: string): Set<string> {
+  const out = new Set<string>();
+  for (const tok of normalized.split(/[^a-z0-9]+/)) {
+    if (tok.length > 0) out.add(tok);
+  }
+  return out;
+}
+
+/** Jaccard overlap of two token sets. Two empty sets are treated as identical. */
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 && b.size === 0) return 1;
+  let intersection = 0;
+  for (const t of a) {
+    if (b.has(t)) intersection += 1;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
 
 /**

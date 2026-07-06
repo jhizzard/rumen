@@ -68,7 +68,15 @@ CREATE TABLE IF NOT EXISTS memory_items (
   -- Rumen v0.1 never reads this column directly. Stored as a cheap NUMERIC[]
   -- so the CI fixture does not need the pgvector extension installed.
   embedding   NUMERIC[],
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Recall telemetry denorm (engram migration 027) + the reinforcement weight
+  -- (engram migration 032). Rumen's reinforce pass (src/reinforce.ts) READS
+  -- recall_count / last_recalled_at and WRITES recall_boost via set_recall_boost
+  -- below. recall_boost defaults to 1.0 (a strict no-op multiplier). Keep these
+  -- in lockstep with src/reinforce.ts whenever the reinforce queries change.
+  recall_count     INTEGER     NOT NULL DEFAULT 0,
+  last_recalled_at TIMESTAMPTZ,
+  recall_boost     NUMERIC     NOT NULL DEFAULT 1.0
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_items_session_id
@@ -76,6 +84,34 @@ CREATE INDEX IF NOT EXISTS idx_memory_items_session_id
 
 CREATE INDEX IF NOT EXISTS idx_memory_items_project
   ON memory_items (project);
+
+-- ---------------------------------------------------------------------------
+-- memory_recall_log — recall-provenance log (engram migration 027 + 031).
+--
+-- One row per (recall event, surfaced memory). Rumen's reinforce pass reads
+-- memory_id / cited / created_at within its window to compute the bounded
+-- recall_boost; the denorm rollup on memory_items (recall_count /
+-- last_recalled_at) is the durable signal since raw rows here purge at 90d.
+-- The extra provenance columns (source_session_id / source_agent / source_type
+-- / dismissed) mirror the real table for parity but reinforce ignores them.
+-- Keep in lockstep with src/reinforce.ts::tallyWindow.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS memory_recall_log (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  memory_id          UUID NOT NULL REFERENCES memory_items(id) ON DELETE CASCADE,
+  cited              BOOLEAN NOT NULL DEFAULT FALSE,
+  dismissed          BOOLEAN NOT NULL DEFAULT FALSE,
+  source_session_id  UUID,
+  source_agent       TEXT,
+  source_type        TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_recall_log_memory_id
+  ON memory_recall_log (memory_id);
+
+CREATE INDEX IF NOT EXISTS idx_memory_recall_log_created_at
+  ON memory_recall_log (created_at DESC);
 
 -- ---------------------------------------------------------------------------
 -- memory_hybrid_search — keyword-only fixture stand-in.
@@ -250,6 +286,41 @@ AS $$
 $$;
 
 -- ---------------------------------------------------------------------------
+-- set_recall_boost — reinforcement-weight writer stand-in (engram migration
+-- 032). The ONLY sanctioned path by which Rumen's reinforce pass touches
+-- memory_items, and it touches ONLY recall_boost (doctrine-clean). p_updates is
+-- a JSON array [{"id": "<uuid>", "boost": <numeric>}, ...]; each boost is
+-- CLAMPED server-side to [1.0, 2.0] (floor 1.0 = never demote below the no-op;
+-- ceiling 2.0 = the bound that stops rich-get-richer). Returns rows updated.
+--
+-- The real 032 is `security definer` + `set search_path` + REVOKE EXECUTE FROM
+-- PUBLIC + GRANT TO service_role (the five RLS gates). Those are deliberately
+-- NOT mirrored here: the CI fixture runs as superuser where they are untestable
+-- theater — T1's migration owns that surface (same posture as memory_inbox).
+-- ---------------------------------------------------------------------------
+-- Mirrors T1's real 032 shape (STATUS 2026-07-05 17:28): a single set-based
+-- UPDATE over jsonb_to_recordset(p_updates) AS u(id uuid, boost numeric), never
+-- a per-row loop. Clamp is identical: least(2.0, greatest(1.0, boost)).
+CREATE OR REPLACE FUNCTION set_recall_boost(p_updates JSONB)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_updated INTEGER := 0;
+BEGIN
+  IF p_updates IS NULL OR jsonb_typeof(p_updates) <> 'array' THEN
+    RETURN 0;
+  END IF;
+  UPDATE memory_items m
+    SET recall_boost = LEAST(2.0, GREATEST(1.0, u.boost))
+    FROM jsonb_to_recordset(p_updates) AS u(id UUID, boost NUMERIC)
+    WHERE m.id = u.id;
+  GET DIAGNOSTICS v_updated = ROW_COUNT;
+  RETURN v_updated;
+END;
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Seed data: two sessions in two projects, CORS-related content so Rumen's
 -- cross-project relate phase has something to chew on.
 -- ---------------------------------------------------------------------------
@@ -283,5 +354,31 @@ INSERT INTO memory_items (session_id, content, source_type, project, created_at)
   ('22222222-2222-2222-2222-222222222222',
    'Allowed origin list updated to include staging domain',
    'note', 'project-beta', NOW() - INTERVAL '1 day');
+
+-- ---------------------------------------------------------------------------
+-- Recall telemetry seed: mark two memories as recently recalled so a reinforce
+-- pass has candidates. One is CITED (the strong signal → higher boost), the
+-- other merely SURFACED. Denorm recall_count/last_recalled_at + raw
+-- memory_recall_log rows are seeded together, mirroring engram 027/031.
+-- ---------------------------------------------------------------------------
+UPDATE memory_items
+  SET recall_count = 5, last_recalled_at = NOW() - INTERVAL '1 hour'
+  WHERE content = 'Widened allowed headers list to include X-Request-Id';
+UPDATE memory_items
+  SET recall_count = 2, last_recalled_at = NOW() - INTERVAL '2 days'
+  WHERE content = 'Enabled CORS middleware in express with allow list';
+
+INSERT INTO memory_recall_log (memory_id, cited, source_type, created_at)
+SELECT m.id, TRUE, m.source_type, NOW() - INTERVAL '1 hour'
+  FROM memory_items m
+ WHERE m.content = 'Widened allowed headers list to include X-Request-Id';
+INSERT INTO memory_recall_log (memory_id, cited, source_type, created_at)
+SELECT m.id, FALSE, m.source_type, NOW() - INTERVAL '30 hours'
+  FROM memory_items m
+ WHERE m.content = 'Widened allowed headers list to include X-Request-Id';
+INSERT INTO memory_recall_log (memory_id, cited, source_type, created_at)
+SELECT m.id, FALSE, m.source_type, NOW() - INTERVAL '2 days'
+  FROM memory_items m
+ WHERE m.content = 'Enabled CORS middleware in express with allow list';
 
 COMMIT;

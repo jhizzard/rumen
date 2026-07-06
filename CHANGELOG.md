@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.8.0] - 2026-07-05
+
+### Added — recall-feedback learning loop (Sprint 81 T2)
+- **`src/reinforce.ts`** + Edge Function **`rumen-reinforce`** (thin-wrapper, npm-pin `@jhizzard/rumen@0.8.0`, watchdog, `DATABASE_URL` fallback, fail-soft, `RUMEN_REINFORCE_DRY_RUN=1`): windows over engram's `memory_recall_log` + the durable denorm (`recall_count`/`last_recalled_at`, which survives the 90-day raw-log purge), computes a smoothed EWMA reinforcement weight per memory (`target = 1 + (2−1)·usage·recency`; usage saturates with `cited` weighted 3× `surfaced`; 30-day recency half-life; bounded `[1.0, 2.0]`, strict no-op at 1.0 so never-recalled memories stay untouched), and writes changed rows via ONE `set_recall_boost` call. **Doctrine-clean**: writes ONLY `memory_items.recall_boost` via the column-scoped RPC — never ranking content, never a raw `UPDATE memory_items`; builds on the auto-populated `cited` signal, not the manual `acted_upon`. Closes the memory→recall→reinjection→**learning** loop (engram 032's `recall_boost` factor consumes it).
+
+### Changed — synthesis quality (Sprint 81 T2)
+- `computeConfidence` (`src/synthesize.ts`) recalibrated against the RRF fusion band (0.01–0.3) via a new `normalizeSimilarity()` (`src/confidence.ts`) so a strong same-project match no longer loses to a weak cross-project one (the pre-v2 drown bug); a new `noveltyFactor()` down-ranks near-duplicate prior art (union-find on normalized-content equality OR token-Jaccard ≥ 0.85, bounded `[0.5, 1]` asymptotic floor); `buildUserPrompt` enriched with per-memory age, cross-project spread, and recency.
+- `docs/MNESTRA-COMPATIBILITY.md` / `CONTRIBUTING.md` document `recall_boost` as Rumen's fourth (bounded, RPC-only) `memory_items` write surface.
+
+### Notes
+- Sprint 81 T2, FINAL-VERDICT green (T7 Codex auditor). `npm test` **156** (0 fail, 1 real-PG skip), `tsc` clean, gitleaks 0. `rumen-reinforce` deploys after this publish + engram 032 live (`recall_boost` col + `set_recall_boost` RPC); its pg_cron schedule is a follow-on (manually invocable meanwhile). Companions: `@jhizzard/mnestra@0.9.0` + `@jhizzard/termdeck@1.14.0`.
+
 ## [0.7.0] - 2026-07-05
 
 ### Added — doctrine-scan (detect + synthesize)

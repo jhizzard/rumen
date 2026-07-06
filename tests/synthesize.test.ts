@@ -11,15 +11,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildUserPrompt,
   computeConfidence,
   createSynthesizeContext,
   makePlaceholderInsight,
+  noveltyFactor,
   repairCommonJsonIssues,
   sliceFirstJsonBlock,
   synthesizeInsights,
   tryParseInsight,
 } from '../src/synthesize.ts';
-import { normalize as normalizeConfidence } from '../src/confidence.ts';
+import {
+  normalize as normalizeConfidence,
+  normalizeSimilarity,
+} from '../src/confidence.ts';
 import {
   makeMockAnthropic,
   makeRelatedMemory,
@@ -320,46 +325,51 @@ test('filterValidCitations: empty cited_ids falls back to all related IDs', asyn
 
 // ── computeConfidence ───────────────────────────────────────────────────────
 
-test('computeConfidence: single-project same-day → only maxSimilarity contributes', () => {
+test('computeConfidence: single-project same-day → only RRF-normalized similarity contributes', () => {
   const rs = makeRelatedSignal({
     related: [
       makeRelatedMemory({
         id: ID_A,
         project: 'alpha',
-        similarity: 0.8,
+        content: 'distinct one',
+        similarity: 0.155, // midpoint of the RRF band
         created_at: '2026-04-10T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'alpha',
-        similarity: 0.6,
+        content: 'distinct two',
+        similarity: 0.08,
         created_at: '2026-04-10T00:00:00Z',
       }),
     ],
   });
-  // 0.5 * 0.8 + 0.3 * 0 + 0.2 * 0 = 0.4 (raw, pre-normalization)
-  assert.equal(computeConfidence(rs), 0.4);
+  // maxRrf 0.155 → simScore (0.155-0.01)/0.29 = 0.5; cross 0; ageSpread 0; novelty 1.0
+  // 0.55 * 0.5 = 0.275  (pre-v2 this was 0.5*0.155 = 0.078 — the drown bug)
+  assert.equal(computeConfidence(rs), 0.275);
 });
 
-test('computeConfidence: cross-project recent → crossProjectBonus is full', () => {
+test('computeConfidence: cross-project ceiling-similarity → similarity leads, cross-project adds', () => {
   const rs = makeRelatedSignal({
     related: [
       makeRelatedMemory({
         id: ID_A,
         project: 'alpha',
-        similarity: 0.9,
+        content: 'aaa distinct',
+        similarity: 0.9, // saturates above the RRF ceiling
         created_at: '2026-04-10T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'beta',
+        content: 'bbb distinct',
         similarity: 0.7,
         created_at: '2026-04-10T00:00:00Z',
       }),
     ],
   });
-  // 0.5 * 0.9 + 0.3 * 1 + 0.2 * 0 = 0.75 (raw, pre-normalization)
-  assert.equal(computeConfidence(rs), 0.75);
+  // simScore 1.0 + cross 1 + ageSpread 0, novelty 1.0 → 0.55 + 0.30 = 0.85
+  assert.equal(computeConfidence(rs), 0.85);
 });
 
 test('computeConfidence: same-project wide-age-spread → ageSpreadBonus maxes', () => {
@@ -368,39 +378,43 @@ test('computeConfidence: same-project wide-age-spread → ageSpreadBonus maxes',
       makeRelatedMemory({
         id: ID_A,
         project: 'alpha',
-        similarity: 0.5,
+        content: 'ccc distinct',
+        similarity: 0.3, // at the RRF ceiling → simScore 1.0
         created_at: '2026-01-01T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'alpha',
-        similarity: 0.3,
+        content: 'ddd distinct',
+        similarity: 0.155,
         created_at: '2026-03-01T00:00:00Z',
       }),
     ],
   });
-  // 0.5 * 0.5 + 0.3 * 0 + 0.2 * 1 = 0.45 (raw, pre-normalization)
-  assert.equal(computeConfidence(rs), 0.45);
+  // simScore 1.0 + cross 0 + ageSpread (59d/14 → 1.0), novelty 1.0 → 0.55 + 0.15 = 0.70
+  assert.equal(computeConfidence(rs), 0.7);
 });
 
-test('computeConfidence: all bonuses → composite of all three terms', () => {
+test('computeConfidence: all three terms + distinct content → saturates at 1.0', () => {
   const rs = makeRelatedSignal({
     related: [
       makeRelatedMemory({
         id: ID_A,
         project: 'alpha',
+        content: 'eee distinct',
         similarity: 1.0,
         created_at: '2026-01-01T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'beta',
+        content: 'fff distinct',
         similarity: 0.9,
         created_at: '2026-03-01T00:00:00Z',
       }),
     ],
   });
-  // 0.5 * 1.0 + 0.3 * 1 + 0.2 * 1 = 1.0 (raw, clamped, pre-normalization)
+  // simScore 1.0 + cross 1 + ageSpread 1, novelty 1.0 → 0.55 + 0.30 + 0.15 = 1.0
   assert.equal(computeConfidence(rs), 1.0);
 });
 
@@ -409,21 +423,203 @@ test('computeConfidence: zero related memories → 0 confidence', () => {
   assert.equal(computeConfidence(rs), 0);
 });
 
+// ── RRF-band recalibration (v2) ─────────────────────────────────────────────
+
+test('normalizeSimilarity: RRF band (0.01–0.3) maps onto 0..1 with saturation', () => {
+  assert.equal(normalizeSimilarity(0.01), 0); // floor
+  assert.equal(normalizeSimilarity(0.3), 1); // ceiling
+  assert.ok(Math.abs(normalizeSimilarity(0.155) - 0.5) < 1e-9); // midpoint
+  assert.equal(normalizeSimilarity(0.9), 1); // above ceiling saturates
+  assert.equal(normalizeSimilarity(0), 0); // below floor
+  assert.equal(normalizeSimilarity(Number.NaN), 0); // non-finite
+});
+
+test('computeConfidence: RRF floor contributes ~0, ceiling saturates the similarity term', () => {
+  const floor = makeRelatedSignal({
+    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: 0.01 })],
+  });
+  const ceil = makeRelatedSignal({
+    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: 0.3 })],
+  });
+  // single memory: cross 0, ageSpread 0, novelty 1.0 → confidence == 0.55 * simScore
+  assert.equal(computeConfidence(floor), 0);
+  assert.equal(computeConfidence(ceil), 0.55);
+});
+
+test('computeConfidence: strong same-project match now outranks weak cross-project (the drown fix)', () => {
+  const strongSameProject = makeRelatedSignal({
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'xxx one', similarity: 0.3 }),
+      makeRelatedMemory({ id: ID_B, project: 'alpha', content: 'yyy two', similarity: 0.28 }),
+    ],
+  });
+  const weakCrossProject = makeRelatedSignal({
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'xxx one', similarity: 0.02 }),
+      makeRelatedMemory({ id: ID_B, project: 'beta', content: 'yyy two', similarity: 0.02 }),
+    ],
+  });
+  const strong = computeConfidence(strongSameProject); // 0.55 * 1.0 = 0.55
+  const weak = computeConfidence(weakCrossProject); // 0.55*~0.034 + 0.30 ≈ 0.319
+  // Pre-v2: weak (0.5*0.02 + 0.3 = 0.31) BEAT strong (0.5*0.3 = 0.15). Now fixed.
+  assert.ok(
+    strong > weak,
+    `expected strong same-project (${strong}) > weak cross-project (${weak})`,
+  );
+});
+
+// ── noveltyFactor: down-rank near-duplicate prior art ───────────────────────
+
+test('computeConfidence: identical related content is down-ranked vs distinct content', () => {
+  const distinct = makeRelatedSignal({
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'a distinct note', similarity: 1.0, created_at: '2026-04-10T00:00:00Z' }),
+      makeRelatedMemory({ id: ID_B, project: 'beta', content: 'a different note', similarity: 0.9, created_at: '2026-04-10T00:00:00Z' }),
+    ],
+  });
+  const duplicated = makeRelatedSignal({
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'the very same memory text', similarity: 1.0, created_at: '2026-04-10T00:00:00Z' }),
+      makeRelatedMemory({ id: ID_B, project: 'beta', content: 'the very same memory text', similarity: 0.9, created_at: '2026-04-10T00:00:00Z' }),
+    ],
+  });
+  // both: simScore 1.0 + cross 1 + ageSpread 0 = composite 0.85
+  // distinct novelty 1.0 → 0.85; duplicated novelty 0.75 → 0.85*0.75 = 0.6375 → 0.638
+  assert.equal(computeConfidence(distinct), 0.85);
+  assert.equal(computeConfidence(duplicated), 0.638);
+  assert.ok(computeConfidence(duplicated) < computeConfidence(distinct));
+});
+
+test('noveltyFactor: all-distinct content → 1.0 (no penalty)', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'alpha beta gamma' }),
+    makeRelatedMemory({ id: ID_B, content: 'delta epsilon zeta' }),
+    makeRelatedMemory({ id: ID_C, content: 'eta theta iota' }),
+  ];
+  assert.equal(noveltyFactor(related), 1);
+});
+
+test('noveltyFactor: all-identical content → 1 cluster / N', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'same text here' }),
+    makeRelatedMemory({ id: ID_B, content: 'same text here' }),
+    makeRelatedMemory({ id: ID_C, content: 'same text here' }),
+  ];
+  // 1 distinct / 3 = 0.333 → 0.5 + 0.5*0.333
+  assert.ok(Math.abs(noveltyFactor(related) - (0.5 + 0.5 * (1 / 3))) < 1e-9);
+});
+
+test('noveltyFactor: whitespace/case-only differences count as duplicates', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'Fixed The Bug' }),
+    makeRelatedMemory({ id: ID_B, content: 'fixed   the   bug' }),
+  ];
+  // both normalize to "fixed the bug" → 1 cluster / 2 → 0.75
+  assert.equal(noveltyFactor(related), 0.75);
+});
+
+test('noveltyFactor: high token-overlap (Jaccard ≥ 0.85) counts as near-duplicate', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'one two three four five six seven eight' }),
+    makeRelatedMemory({ id: ID_B, content: 'one two three four five six seven eight nine' }),
+  ];
+  // Jaccard 8/9 ≈ 0.889 ≥ 0.85 → 1 cluster / 2 → 0.75
+  assert.equal(noveltyFactor(related), 0.75);
+});
+
+test('noveltyFactor: disjoint token sets stay distinct', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'one two three four' }),
+    makeRelatedMemory({ id: ID_B, content: 'five six seven eight' }),
+  ];
+  assert.equal(noveltyFactor(related), 1);
+});
+
+test('noveltyFactor: single or empty related set → 1.0', () => {
+  assert.equal(noveltyFactor([makeRelatedMemory({})]), 1);
+  assert.equal(noveltyFactor([]), 1);
+});
+
+test('noveltyFactor: mixed — two dups + one distinct → 2 clusters / 3', () => {
+  const related = [
+    makeRelatedMemory({ id: ID_A, content: 'duplicated body text' }),
+    makeRelatedMemory({ id: ID_B, content: 'duplicated body text' }),
+    makeRelatedMemory({ id: ID_C, content: 'a completely separate note' }),
+  ];
+  // 2 clusters / 3 = 0.667 → 0.5 + 0.5*0.667
+  assert.ok(Math.abs(noveltyFactor(related) - (0.5 + 0.5 * (2 / 3))) < 1e-9);
+});
+
+// ── buildUserPrompt enrichment: recency/age + cross-project spread ──────────
+
+test('buildUserPrompt: includes per-memory age, cross-project spread, and recency window', () => {
+  const now = Date.parse('2026-04-13T00:00:00Z');
+  const rs = makeRelatedSignal({
+    key: 'session:a',
+    project: 'alpha',
+    description: 'did a thing',
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'newer note', similarity: 0.2, created_at: '2026-04-10T00:00:00Z' }),
+      makeRelatedMemory({ id: ID_B, project: 'beta', content: 'older note', similarity: 0.1, created_at: '2026-03-14T00:00:00Z' }),
+    ],
+  });
+  const prompt = buildUserPrompt([rs], now);
+  assert.ok(
+    prompt.includes('cross-project spread: 2 projects (alpha, beta) across 2 memories'),
+    prompt,
+  );
+  assert.ok(prompt.includes('recency: newest 3d ago, oldest 30d ago'), prompt);
+  assert.ok(prompt.includes('age=3d'), 'newer memory age');
+  assert.ok(prompt.includes('age=30d'), 'older memory age');
+  assert.ok(prompt.includes('similarity=0.20'), 'similarity still rendered');
+});
+
+test('buildUserPrompt: single-project single-memory spread wording is singular', () => {
+  const now = Date.parse('2026-04-13T00:00:00Z');
+  const rs = makeRelatedSignal({
+    project: 'alpha',
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'x', created_at: '2026-04-12T00:00:00Z' }),
+    ],
+  });
+  const prompt = buildUserPrompt([rs], now);
+  assert.ok(
+    prompt.includes('cross-project spread: 1 project (alpha) across 1 memory'),
+    prompt,
+  );
+  assert.ok(prompt.includes('age=1d'), prompt);
+});
+
+test('buildUserPrompt: unparseable created_at → age=unknown and no recency line', () => {
+  const now = Date.parse('2026-04-13T00:00:00Z');
+  const rs = makeRelatedSignal({
+    project: 'alpha',
+    related: [
+      makeRelatedMemory({ id: ID_A, project: 'alpha', content: 'x', created_at: 'not-a-date' }),
+    ],
+  });
+  const prompt = buildUserPrompt([rs], now);
+  assert.ok(prompt.includes('age=unknown'), prompt);
+  assert.ok(!prompt.includes('recency:'), 'no recency line when no dates parse');
+});
+
 // ── Confidence normalization integration ────────────────────────────────────
 
 test('makePlaceholderInsight: confidence is normalized by cluster size', () => {
-  // 2 related memories with all bonuses → raw 1.0 → normalize(1.0, 2) = 0.7
+  // 2 DISTINCT related memories with all bonuses → raw 1.0 → normalize(1.0, 2) = 0.7
   const rs = makeRelatedSignal({
     related: [
       makeRelatedMemory({
         id: ID_A,
         project: 'alpha',
+        content: 'ggg distinct',
         similarity: 1.0,
         created_at: '2026-01-01T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'beta',
+        content: 'hhh distinct',
         similarity: 0.9,
         created_at: '2026-03-01T00:00:00Z',
       }),
@@ -432,6 +628,7 @@ test('makePlaceholderInsight: confidence is normalized by cluster size', () => {
   const raw = computeConfidence(rs);
   const expected = normalizeConfidence(raw, rs.related.length);
   assert.equal(makePlaceholderInsight(rs).confidence, expected);
+  assert.equal(raw, 1.0);
   assert.equal(expected, 0.7); // documents the curve at size=2 (clamped to 0.7 ceiling for size <5)
 });
 

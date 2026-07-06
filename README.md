@@ -134,6 +134,29 @@ park at `status='candidate'` until a key is available, distinguishable in `doctr
 from a genuine flatline. Tuning knobs (defaults): `DOCTRINE_SCAN_MAX_LLM_CALLS` (10 per scan),
 `DOCTRINE_SCAN_BUDGET_MS` (110000).
 
+### Optional: the recall-feedback loop (`rumen-reinforce`)
+
+A fourth sibling Edge Function closes the loop: it consumes what actually got recalled and
+reinforces accordingly. Each pass reads recall telemetry — the `recall_count` / `last_recalled_at`
+denorm plus the `cited` flag in `memory_recall_log` — and writes ONE bounded reinforcement weight
+per recently-recalled memory to `memory_items.recall_boost`, so genuinely-useful memories rank a
+little higher next time. The weight is clamped to `[1.0, 2.0]` (1.0 is a strict no-op), saturates
+with usage, and decays with recency, so popularity can't compound without limit. It makes **no LLM
+calls** and writes ONLY `recall_boost`, through the column-scoped `set_recall_boost` RPC — never
+memory content.
+
+```bash
+supabase functions deploy rumen-reinforce
+supabase secrets set DATABASE_URL="$DATABASE_URL"
+# Requires engram migration 032 (recall_boost column + set_recall_boost RPC) applied.
+# Optional dry run (compute + log, no write):
+supabase secrets set RUMEN_REINFORCE_DRY_RUN=1
+```
+
+No model key is required. Tuning knobs (defaults): `RUMEN_REINFORCE_WINDOW_DAYS` (90),
+`RUMEN_REINFORCE_BATCH` (500), `RUMEN_REINFORCE_MAX_BOOST` (2.0), `RUMEN_REINFORCE_HALFLIFE_DAYS`
+(30), `RUMEN_REINFORCE_ALPHA` (0.5, EWMA smoothing).
+
 ### Connection URL convention
 
 Per [`docs/MNESTRA-COMPATIBILITY.md`](docs/MNESTRA-COMPATIBILITY.md) and the operational lessons inherited from Podium, Rumen always uses Supabase **Shared Pooler IPv4** URLs, never Dedicated Pooler. The URL format:
@@ -174,6 +197,7 @@ Every log line in Rumen uses one of these tags:
 | `[rumen-surface]` | Writing insights back to DB |
 | `[rumen-promote]` | memory_inbox promotion pass (proposals → canonical or rejected) |
 | `[rumen-doctrine-scan]` | Density clustering + Haiku synthesis into `doctrine_registry` |
+| `[rumen-reinforce]` | Recall-feedback loop — bounded `recall_boost` writes |
 
 This makes Supabase Edge Function logs trivially greppable.
 
