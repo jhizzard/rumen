@@ -107,9 +107,12 @@ export type {
 const DEFAULT_MAX_SESSIONS = 10;
 const DEFAULT_LOOKBACK_HOURS = 72;
 // Mnestra's memory_hybrid_search returns RRF-fused scores with recency decay,
-// which land in a 0.01–0.3 range — NOT 0–1 similarity. A 0.7 threshold is
-// unreachable and causes every signal to match 0 memories. 0.01 is the
-// effective floor for "better than nothing" under this scoring model.
+// which land in a narrow ~0.003–0.074 band — NOT 0–1 similarity (the ceiling
+// is derived in confidence.ts RRF_BAND_MAX and confirmed against live
+// telemetry). A 0.7 threshold is unreachable and causes every signal to match
+// 0 memories. 0.01 sits just under the observed 10th percentile (0.0109), so
+// it discards roughly the weakest tenth of hits — the effective floor for
+// "better than nothing" under this scoring model.
 const DEFAULT_MIN_SIMILARITY = 0.01;
 const DEFAULT_MIN_EVENT_COUNT = 3;
 // Whole-job wall-clock budget. Supabase Edge Functions are killed at 150s;

@@ -702,8 +702,9 @@ export function computeConfidence(rs: RelatedSignal): number {
   if (rs.related.length === 0) return 0;
 
   // Similarity: take the strongest related-memory score and map it from
-  // Mnestra's RRF band (0.01–0.3) onto 0..1 so it is not drowned by the flat
-  // cross-project bonus.
+  // Mnestra's RRF band onto 0..1 by its position in the observed score
+  // distribution, so it is not drowned by the flat cross-project bonus.
+  // (Band bounds are DERIVED, not guessed — see confidence.ts RRF_BAND_MAX.)
   const maxRrf = rs.related.reduce((m, r) => Math.max(m, r.similarity), 0);
   const simScore = normalizeSimilarity(maxRrf);
 

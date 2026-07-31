@@ -24,6 +24,9 @@ import {
 import {
   normalize as normalizeConfidence,
   normalizeSimilarity,
+  RRF_BAND_MAX,
+  RRF_BAND_MIN,
+  RRF_QUANTILE_KNOTS,
 } from '../src/confidence.ts';
 import {
   makeMockAnthropic,
@@ -332,20 +335,22 @@ test('computeConfidence: single-project same-day → only RRF-normalized similar
         id: ID_A,
         project: 'alpha',
         content: 'distinct one',
-        similarity: 0.155, // midpoint of the RRF band
+        similarity: 0.02188507, // the live median of the RRF band (v3 knot)
         created_at: '2026-04-10T00:00:00Z',
       }),
       makeRelatedMemory({
         id: ID_B,
         project: 'alpha',
         content: 'distinct two',
-        similarity: 0.08,
+        similarity: 0.012,
         created_at: '2026-04-10T00:00:00Z',
       }),
     ],
   });
-  // maxRrf 0.155 → simScore (0.155-0.01)/0.29 = 0.5; cross 0; ageSpread 0; novelty 1.0
-  // 0.55 * 0.5 = 0.275  (pre-v2 this was 0.5*0.155 = 0.078 — the drown bug)
+  // maxRrf 0.02188507 is the p50 knot → simScore 0.5; cross 0; ageSpread 0;
+  // novelty 1.0 → 0.55 * 0.5 = 0.275. (Pre-v2 this was 0.5*maxRrf = 0.011;
+  // under v2's ~4x-too-high ceiling it was 0.55*0.041 = 0.023 — the drown bug
+  // survived v2 and is only actually fixed in v3.)
   assert.equal(computeConfidence(rs), 0.275);
 });
 
@@ -423,27 +428,89 @@ test('computeConfidence: zero related memories → 0 confidence', () => {
   assert.equal(computeConfidence(rs), 0);
 });
 
-// ── RRF-band recalibration (v2) ─────────────────────────────────────────────
+// ── RRF-band recalibration (v3) ─────────────────────────────────────────────
 
-test('normalizeSimilarity: RRF band (0.01–0.3) maps onto 0..1 with saturation', () => {
-  assert.equal(normalizeSimilarity(0.01), 0); // floor
-  assert.equal(normalizeSimilarity(0.3), 1); // ceiling
-  assert.ok(Math.abs(normalizeSimilarity(0.155) - 0.5) < 1e-9); // midpoint
+test('normalizeSimilarity: deployed RRF band maps onto 0..1 with saturation', () => {
+  assert.equal(normalizeSimilarity(RRF_BAND_MIN), 0); // observed floor
+  assert.equal(normalizeSimilarity(RRF_BAND_MAX), 1); // derived ceiling
   assert.equal(normalizeSimilarity(0.9), 1); // above ceiling saturates
   assert.equal(normalizeSimilarity(0), 0); // below floor
   assert.equal(normalizeSimilarity(Number.NaN), 0); // non-finite
+  assert.equal(normalizeSimilarity(Number.POSITIVE_INFINITY), 0); // non-finite
+});
+
+test('normalizeSimilarity: the derived ceiling is the analytic one, not a guess', () => {
+  // 2/(rrf_k+1) x 1.5 type x 1.5 project, rrf_k = 60. Live telemetry max over
+  // 39,048 rows was 0.0737700719567695 — the same number to 7 s.f.
+  assert.ok(Math.abs(RRF_BAND_MAX - (2 / 61) * 1.5 * 1.5) < 1e-12);
+  // Guard the specific regression this replaced: the old ceiling of 0.3 was
+  // ~4x too high, which is what made the v2 weight rebalance inert.
+  assert.ok(RRF_BAND_MAX < 0.1);
+});
+
+test('normalizeSimilarity: a live-median score lands mid-band, not near-floor', () => {
+  // Live p50 over the 90-day retention window is 0.0219; 0.0216 is the value
+  // quoted in the Sprint 82 brief. Under the old [0.01, 0.3] band this
+  // normalized to 0.041 — indistinguishable from noise, and 13x dominated by
+  // the flat cross-project bonus inside computeConfidence.
+  const mid = normalizeSimilarity(0.0216);
+  assert.ok(mid > 0.45 && mid < 0.55, `expected mid-band, got ${mid}`);
+  // The exact median knot pins to exactly 0.5 by construction.
+  assert.ok(Math.abs(normalizeSimilarity(0.02188507) - 0.5) < 1e-9);
+  // A genuinely weak hit still reads weak, and a top-decile hit still reads
+  // strong — the map moves the middle, it does not flatten the ends.
+  assert.ok(normalizeSimilarity(0.0095) < 0.1);
+  assert.ok(normalizeSimilarity(0.035) > 0.9);
+});
+
+test('normalizeSimilarity: monotonic non-decreasing across the whole band', () => {
+  let prev = -1;
+  for (let s = 0; s <= 0.08; s += 0.0005) {
+    const v = normalizeSimilarity(s);
+    assert.ok(v >= prev, `not monotonic at ${s}: ${v} < ${prev}`);
+    assert.ok(v >= 0 && v <= 1, `out of range at ${s}: ${v}`);
+    prev = v;
+  }
+});
+
+test('normalizeSimilarity: every quantile knot maps to its own quantile', () => {
+  for (const [score, q] of RRF_QUANTILE_KNOTS) {
+    assert.ok(
+      Math.abs(normalizeSimilarity(score) - q) < 1e-9,
+      `knot ${score} should map to ${q}, got ${normalizeSimilarity(score)}`
+    );
+  }
+  // Knots must stay sorted ascending in BOTH coordinates — that is what makes
+  // the interpolation monotonic. Guards a bad telemetry refresh.
+  for (let i = 1; i < RRF_QUANTILE_KNOTS.length; i++) {
+    assert.ok(RRF_QUANTILE_KNOTS[i][0] > RRF_QUANTILE_KNOTS[i - 1][0]);
+    assert.ok(RRF_QUANTILE_KNOTS[i][1] > RRF_QUANTILE_KNOTS[i - 1][1]);
+  }
 });
 
 test('computeConfidence: RRF floor contributes ~0, ceiling saturates the similarity term', () => {
   const floor = makeRelatedSignal({
-    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: 0.01 })],
+    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: RRF_BAND_MIN })],
   });
   const ceil = makeRelatedSignal({
-    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: 0.3 })],
+    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: RRF_BAND_MAX })],
   });
   // single memory: cross 0, ageSpread 0, novelty 1.0 → confidence == 0.55 * simScore
   assert.equal(computeConfidence(floor), 0);
   assert.equal(computeConfidence(ceil), 0.55);
+});
+
+test('computeConfidence: a median-strength hit is no longer drowned by the flat bonus', () => {
+  // The design intent in confidence.ts is that the similarity term must be
+  // comparable to the 0.30 cross-project bonus for a typical match. Single
+  // memory, one project: cross 0, ageSpread 0, novelty 1.0 → 0.55 * simScore.
+  const median = makeRelatedSignal({
+    related: [makeRelatedMemory({ id: ID_A, project: 'alpha', similarity: 0.02188507 })],
+  });
+  const contribution = computeConfidence(median);
+  assert.ok(Math.abs(contribution - 0.275) < 0.005, `got ${contribution}`);
+  // Pre-Sprint-82 this was 0.55 * 0.041 = 0.023, a 13:1 domination.
+  assert.ok(contribution > 0.2);
 });
 
 test('computeConfidence: strong same-project match now outranks weak cross-project (the drown fix)', () => {

@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.9.0] - 2026-07-30
+
+### Changed — confidence v3: derived RRF band + quantile-anchored normalization (Sprint 82 T3)
+- **`RRF_CEILING = 0.3` → derived `RRF_BAND_MAX = 0.0737704918`** (`src/confidence.ts`): the analytic ceiling of engram's `memory_hybrid_search` RRF composite, `2/(rrf_k+1) × 1.5 × 1.5` at `rrf_k=60` — confirmed by live telemetry hitting it to 7 significant figures (~39k `memory_recall_log` rows, deployed max 0.0737700719…). The 0.3 assumption meant normalized confidence topped out ≈0.22 and the similarity term was structurally drowned. `RRF_BAND_MIN = 0.00308726` (observed floor — empirical, a function of candidate-pool depth). Old names kept as `@deprecated` aliases.
+- **Linear band map → 14-knot quantile-anchored piecewise-linear map** (`RRF_QUANTILE_KNOTS`): RRF is ordinal, so the only honest cardinalization is position in the observed distribution. Knots are a **pinned snapshot** — 2026-07-30 20:11 ET, n = 39,048, `graph` surface + smoke rows excluded — with the exact `percentile_cont` refresh SQL, snapshot provenance, and live-drift note in the docstring (body knots p10–p90 drift ≤0.09%; the p99 tail 2.16%; refreshing knots without bumping the version marker in the same change is explicitly forbidden). **`NORMALIZE_VERSION` 2 → 3** tags the cohort. Knot table byte-identical with engram 0.10.0's `scoreBandPercentile` — the two packages must not disagree about what an RRF score means.
+- Outcome: `normalizeSimilarity(p50 = 0.0219)` = **0.489** (was 0.041); median-strength single-memory `computeConfidence` **0.023 → 0.275** — the similarity term now sits alongside the 0.30 cross-project bonus instead of 13× under it, which is the outcome the v2 recalibration was written to produce and did not.
+
+### Notes
+- Sprint 82 T3, **FINAL-VERDICT-4 GREEN** (T4 Codex adversarial auditor; independent SELECT-only reproduction of the band + per-knot drift to the digit). `npm test` **161 pass / 0 fail / 1 pre-existing skip**, typecheck clean, gitleaks 0. One test fixture moved (`tests/synthesize.test.ts`: `similarity: 0.155` "band midpoint" → the real p50 knot 0.02188507 — under the corrected band 0.155 is 2× the maximum attainable score and saturates; the asserted 0.275 is unchanged, an independent check that the new map puts the live median where the old test believed its midpoint was). Companions: `@jhizzard/mnestra@0.10.0` (migration 033 `semantic_similarity` + calibration contract) + `@jhizzard/termdeck@1.15.0` + `@jhizzard/termdeck-stack@1.13.0`.
+
 ## [0.8.0] - 2026-07-05
 
 ### Added — recall-feedback learning loop (Sprint 81 T2)
