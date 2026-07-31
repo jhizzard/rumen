@@ -138,6 +138,19 @@ async function fetchCandidatePairs(
   // EXPLAIN ANALYZE on the daily-driver project corpus (5,822 active rows, 2026-04-28):
   // 13.5s cold start (since=NULL), HNSW correctly engaged, 718 raw
   // matches → 359 unique pairs at threshold 0.85.
+  //
+  // Sprint 83 T3 — `source_type <> 'consolidation_summary'` on BOTH sides.
+  // graph-consolidation writes one summary memory per community, and a summary
+  // is by construction semantically near-identical to the members it
+  // summarizes: without this exclusion it clears the 0.85 threshold against
+  // most of them on the very next tick, acquiring an edge to each. The graph
+  // then accumulates derivative edges nightly (summary↔member, and eventually
+  // summary↔summary) and nothing about it looks wrong from the outside — the
+  // edge count simply inflates with content that carries no new information.
+  // Consolidation independently refuses to treat summaries as community
+  // members, which stops the summarize-the-summaries LOOP; this predicate is
+  // what stops the EDGE INFLATION. Both are needed; neither subsumes the
+  // other. Cheap: an equality test on an already-scanned row, no new index.
   const result = await sql.unsafe(
     `
       SELECT DISTINCT ON (LEAST(m1.id, nbr.id), GREATEST(m1.id, nbr.id))
@@ -155,6 +168,7 @@ async function fetchCandidatePairs(
         WHERE m2.is_active = true
           AND m2.archived = false
           AND m2.superseded_by IS NULL
+          AND m2.source_type <> 'consolidation_summary'
           AND m2.id <> m1.id
         ORDER BY m2.embedding <=> m1.embedding
         LIMIT $4
@@ -162,6 +176,7 @@ async function fetchCandidatePairs(
       WHERE m1.is_active = true
         AND m1.archived = false
         AND m1.superseded_by IS NULL
+        AND m1.source_type <> 'consolidation_summary'
         AND 1 - (m1.embedding <=> nbr.embedding) >= $1
         AND ($2::timestamptz IS NULL OR m1.updated_at > $2::timestamptz)
       ORDER BY LEAST(m1.id, nbr.id),

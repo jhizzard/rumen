@@ -79,6 +79,29 @@ export type {
   PoolNode,
 } from './doctrine-scan.js';
 export {
+  runGraphConsolidation,
+  probeCapabilities,
+  resolveEntities,
+  fetchLiveEdges,
+  communityKey,
+  sameMembers,
+  buildPrompt,
+  UnionFind,
+  CONSOLIDATION_SOURCE_TYPE,
+  CONSOLIDATION_KIND,
+  CONSOLIDATION_VERSION,
+  OWNED_ROW_PREDICATE,
+} from './graph-consolidation.js';
+export type {
+  ConsolidationOptions,
+  ConsolidationSummary,
+  Capabilities,
+  CommunityStats,
+  EntitySummary,
+  EdgeRow,
+  MemberRow,
+} from './graph-consolidation.js';
+export {
   runRumenReinforce,
   computeRecallBoost,
   DEFAULT_TUNABLES,

@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.10.0] - 2026-07-31
+
+### Added — graph consolidation (Sprint 83 T3)
+- **`src/graph-consolidation.ts` + exported `runGraphConsolidation`** (from `src/index.ts`) — the doctrine-scan split: logic in `src/` (testable by the tsx suite, injectable `PgPool`/`AnthropicLike`/`embed`), thin Deno wrapper at `supabase/functions/graph-consolidation/` (watchdog racing the platform's 150 s kill, per rumen-tick's v0.6.1 lesson). Three phases:
+  - **Entity resolution** over Mnestra 0.11.0's `memory_entities`: group by `(entity_type, entity_key)`, oldest `first_seen_at` (then `id`) wins. Honest scope note: 034's `UNIQUE(entity_type, entity_key)` collapses exact duplicates at write time, so on a healthy store this phase reports `candidates: 0` rather than dressing that up as work — it is the repair path for what the constraint cannot cover (pre-constraint rows, restores, future key widening). Merges entity records only; never touches memory rows.
+  - **Community detection** = connected components over live (`invalid_at IS NULL`) typed edges — deterministic, so an unchanged graph writes nothing; over-large components are **skipped and reported, never truncated** (Leiden documented as the upgrade path, deliberately not built).
+  - **One provenance-marked community-summary memory per community**: `source_type = 'consolidation_summary'` (034's widened CHECK — enforcement, not metadata-only convention), anchor-keyed idempotency that skips BEFORE spending an LLM call, `ON CONFLICT` against 034's partial unique community-key index.
+- **Owned-row guard on every mutating statement — including the `ON CONFLICT DO UPDATE` arm** (`WHERE memory_items.source_type = 'consolidation_summary' AND metadata->'consolidation'->>'kind' = 'community_summary'`) **+ affected-row checks**: 034's partial unique index is metadata-only, so an unguarded upsert could rewrite a canonical row that merely carries the same metadata shape (T4 audit catch). An unowned conflict now updates nothing, is counted as `summaries_conflict_unowned` (its own field — non-zero means something *else* is writing rows with this shape), and is never reported as a write.
+- **Budget isolation**: `GRAPH_CONSOLIDATION_*` env namespace disjoint from `GRAPH_INFERENCE_*`; **`GRAPH_CONSOLIDATION_DRY_RUN=1`** reports without writing — required for the first live run, which must report the component size distribution before any cron is installed (the giant-component risk is unmeasured).
+
+### Changed — self-amplification defense in graph-inference (Sprint 83 T3)
+- `fetchCandidatePairs` (`supabase/functions/graph-inference/index.ts`) now excludes `source_type = 'consolidation_summary'` on **both** LATERAL sides. A community summary is by construction semantically near-identical to its members, so it would clear the 0.85 cosine threshold on the next nightly tick, acquire edges to everything it summarizes, and be summarized again the night after — compounding derivative content that never looks broken from the outside. Consolidation's own member-selection exclusion stops the loop; this stops the edge-count inflation.
+
+### Notes
+- Sprint 83 T3 (rumen half), **FINAL-VERDICT GREEN + GREEN-REAFFIRMED** (T4 Codex adversarial auditor). `npm test` **197 (196 pass / 1 explicit DB skip)**, `tsc --noEmit` clean, gitleaks 0. Consolidation has never run against real data (mock-pool-verified) — first live run in `GRAPH_CONSOLIDATION_DRY_RUN=1` is the acceptance step for deliverable value.
+- **Deploy tail (operator, strictly post-publish):** the `graph-consolidation` wrapper pins `npm:@jhizzard/rumen@0.10.0` — deploy it ONLY after this version is published (deploying against a pre-export pin is a silent no-op, the Sprint-66 Brad-Rumen-zero shape). Cron decision pending: 03:30 UTC proposed but collides with doctrine-scan; ORCH staggers.
+- Known follow-up (BACKLOG'd in termdeck): `tests/graph-consolidation.test.ts:184-195`'s alternate-guard assertion is weaker than the source proof (accepts the `'community_summary'` string as an alternative to `OWNED_ROW_PREDICATE`) — tighten.
+- Companions: `@jhizzard/mnestra@0.11.0` (migration 034 graph layer) + `@jhizzard/termdeck@1.16.0` + `@jhizzard/termdeck-stack@1.14.0`.
+
 ## [0.9.0] - 2026-07-30
 
 ### Changed — confidence v3: derived RRF band + quantile-anchored normalization (Sprint 82 T3)
