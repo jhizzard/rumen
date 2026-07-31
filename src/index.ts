@@ -102,6 +102,23 @@ export type {
   MemberRow,
 } from './graph-consolidation.js';
 export {
+  runExtractionSweep,
+  probeSweepCapabilities,
+  selectCandidates,
+  parseExtraction,
+  buildPrompt as buildSweepPrompt,
+  SWEEP_INFERRED_BY,
+  EXCLUDED_SOURCE_TYPES,
+} from './extract-sweep.js';
+export type {
+  SweepOptions,
+  SweepDeps,
+  SweepSummary,
+  SweepCapabilities,
+  ExtractedEntity,
+  ExtractedTriple,
+} from './extract-sweep.js';
+export {
   runRumenReinforce,
   computeRecallBoost,
   DEFAULT_TUNABLES,
