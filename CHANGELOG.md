@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.11.1] - 2026-08-01
+
+### Fixed — graph-consolidation nightly writes were zeroed by the category CHECK
+- **`src/graph-consolidation.ts` community-summary INSERT no longer stamps `category='consolidation'`** — the value was never legal: `memory_items_category_check` allows only the topical taxonomy (`technical`/`business`/`workflow`/`debugging`/`architecture`/`convention`/`relationship`) or NULL, and S83's I4-b ruling (a) deliberately widened only the **source_type** check (034 added `consolidation_summary`), never category. The S83 dry-run masked it (dry-run skips writes); the first live cron fire (2026-08-01 04:00 UTC, jobid 29) computed `edges=5074 communities=72/555` then threw `23514` on the first insert → `written=0`. Category now stays NULL — provenance already lives in `source_type='consolidation_summary'` + `metadata.consolidation`. Row shape verified against the live constraints pre-release (rolled-back probe insert).
+- **`supabase/functions/graph-consolidation/index.ts` repinned `npm:@jhizzard/rumen@0.10.0` → `@0.11.1`** — the function was still importing 0.10.0 (0.11.0 only repinned `rumen-extract-sweep`). Redeploy `graph-consolidation` after this version is published; the fix is inert until then.
+
 ## [0.11.0] - 2026-07-31
 
 ### Added — extraction sweep + inbox-promote cron restore (Sprint 84 T3)

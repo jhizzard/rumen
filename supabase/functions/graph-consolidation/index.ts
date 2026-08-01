@@ -49,7 +49,7 @@ import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
 // @ts-ignore  npm specifier resolved at runtime. Version is stamped at
 // publish/deploy time by ORCH at sprint close — must be the first version
 // exporting runGraphConsolidation.
-import { runGraphConsolidation, createPoolFromUrl } from 'npm:@jhizzard/rumen@0.10.0';
+import { runGraphConsolidation, createPoolFromUrl } from 'npm:@jhizzard/rumen@0.11.1';
 // @ts-ignore  npm specifier resolved at runtime.
 import Anthropic from 'npm:@anthropic-ai/sdk@0.32.1';
 

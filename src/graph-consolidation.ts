@@ -679,8 +679,12 @@ export async function runGraphConsolidation(
           // rather than assumed. A silent no-op counted as a successful write
           // would be a summary that does not exist and a log that says it does.
           const upserted = await pool.query(
+            // category stays NULL: memory_items_category_check allows only the
+            // topical taxonomy (technical/business/…); provenance already lives
+            // in source_type + metadata.consolidation. A category literal here
+            // fails the check and zeroes every nightly write (2026-08-01).
             `insert into memory_items (content, embedding, source_type, category, project, metadata)
-             values ($1, $2::vector, $3, 'consolidation', $4, $5::jsonb)
+             values ($1, $2::vector, $3, null, $4, $5::jsonb)
              on conflict ((metadata->'consolidation'->>'community_key'))
                where metadata->'consolidation'->>'kind' = '${CONSOLIDATION_KIND}'
                do update set content    = excluded.content,
