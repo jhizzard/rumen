@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _No unreleased changes._
 
+## [0.12.0] - 2026-08-05
+
+### Added — objective-tier anti-drift jobs (Sprint 71 Deck B, dual-deck with Sprint 70)
+- `src/objective-guard.ts` + `supabase/functions/rumen-objective-guard/`: three jobs, all DARK behind two independent switches — contradiction scan (new decisions vs tier-0 objectives → FLAG rows, never silently absorbed or auto-resolved), objective-coverage report (sustained project activity with zero tier-0 linkage = drift signal), objective-staleness review flags (ratification-age; objectives themselves never decay).
+- Migration 009 (guard tables + gates) and 010 (pg_cron registration, registered-then-deactivated = dark). Live-apply is an operator gate alongside engram 037/038.
+- New `tests/objective-guard.test.ts` incl. accessor contract coverage against engram 038's frozen `content` column; suite 270 tests / 269 pass / 1 skip at close.
+
 ## [0.11.1] - 2026-08-01
 
 ### Fixed — graph-consolidation nightly writes were zeroed by the category CHECK
